@@ -1,0 +1,18 @@
+# 运行时生成
+config.json
+error.log
+disabled.flag
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 打包产物
+build/
+dist/
+*.spec
+
+# 临时
+*.tmp
+*.bak
