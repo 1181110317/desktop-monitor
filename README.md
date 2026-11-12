@@ -20,10 +20,12 @@
 ## 它能做什么
 
 - **嵌在任务栏里**：贴在托盘左边，背景真透明，看不出是浮窗
-- **点一下看详情**：CPU / GPU / 内存 / 上下行 / 温度 / 磁盘 / 电池，弹在条的正上方
+- **点一下看详情**：CPU / GPU / 内存 / 上下行 / **Top 进程**（CPU、内存、活跃连接数）/ 温度 / 磁盘 / 电池，弹在条的正上方
 - **三套样式 + 四套主题**：素净 / 胶囊 / 描边；详情卡支持深色 / 浅色 / 简约 / 玻璃
 - **零服务零联网**：采样全走 Windows API，只有渲染用 Pillow
 - **崩溃自愈**：看门狗每 3 分钟检查，进程没了自动拉起
+
+<img src="docs/images/detail.png" width="420" alt="详情">
 
 <table>
 <tr>
@@ -67,6 +69,7 @@ pyinstaller --noconfirm --onefile --windowed --icon icon.ico --name DesktopMonit
 | 部分 | 用的东西 |
 | --- | --- |
 | 采样 | `GetSystemTimes` `GlobalMemoryStatusEx` `GetIfTable2` `GetDiskFreeSpaceExW`，GPU 走 `nvidia-smi` |
+| 进程 | `CreateToolhelp32Snapshot` + `GetProcessTimes` / `GetProcessMemoryInfo`，连接数来自 `GetExtendedTcpTable` |
 | 任务栏停靠 | `SHAppBarMessage` + `EnumChildWindows` 找托盘位置 |
 | 渲染 | Pillow 超采样，任务栏那层用 **WS_EX_LAYERED + UpdateLayeredWindow** 做逐像素透明 |
 | 托盘 | `Shell_NotifyIconW` + 自定义 `WndProc` |

@@ -911,6 +911,7 @@ class Stats:
         rx, tx, names = net_io()
         self.prev_net = (rx, tx, time.monotonic())
         self.net_names = names
+        self.proc = ProcReader()
         self.total_down = 0.0
         self.total_up = 0.0
         self.peak_cpu = 0.0
@@ -920,6 +921,12 @@ class Stats:
         self.temp = TempReader()
         self.temp.start()
         self.cores = os.cpu_count() or 0
+
+    def start(self):
+        try:
+            self.proc.start()
+        except Exception:
+            pass
 
     def sample(self):
         now = time.monotonic()
@@ -976,11 +983,17 @@ class Stats:
             "disk_free": free,
             "disk_total": total,
             "uptime": uptime_seconds(),
+            "procs": self.proc.snapshot()[0],
+            "proc_count": self.proc.snapshot()[1],
         }
 
     def stop(self):
         self.gpu.stop()
         self.temp.stop()
+        try:
+            self.proc.stop()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- 界面
@@ -997,6 +1010,163 @@ def dpi_aware():
 
 
 
+
+class ProcReader(threading.Thread):
+    """每 2 秒采一次：进程 CPU / 内存 / 活跃 TCP 连接数（不需要管理员权限）。"""
+
+    SNAP = 2
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.lock = threading.Lock()
+        self.top = []            # [(name, cpu%, mem_bytes, conns)]
+        self.count = 0
+        self._stop = False
+        self._prev = {}
+
+    # ---------- Win32 结构
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wt.DWORD),
+                    ("cntThreads", wt.DWORD), ("th32ParentProcessID", wt.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wt.DWORD),
+                    ("szExeFile", wt.WCHAR * 260)]
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+    class MIB_TCPROW_OWNER_PID(ctypes.Structure):
+        _fields_ = [("dwState", wt.DWORD), ("dwLocalAddr", wt.DWORD), ("dwLocalPort", wt.DWORD),
+                    ("dwRemoteAddr", wt.DWORD), ("dwRemotePort", wt.DWORD), ("dwOwningPid", wt.DWORD)]
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.top), self.count
+
+    def stop(self):
+        self._stop = True
+
+    # ---------- 采样
+    def _conns_by_pid(self):
+        ip = _iphlp
+        ip.GetExtendedTcpTable.argtypes = [ctypes.c_void_p, ctypes.POINTER(wt.DWORD), wt.BOOL,
+                                           ctypes.c_ulong, ctypes.c_int, wt.DWORD]
+        size = wt.DWORD(0)
+        ip.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, 5, 0)
+        if size.value <= 0:
+            return {}
+        buf = ctypes.create_string_buffer(size.value)
+        if ip.GetExtendedTcpTable(buf, ctypes.byref(size), False, 2, 5, 0) != 0:
+            return {}
+        n = ctypes.cast(buf, ctypes.POINTER(wt.DWORD))[0]
+        row_size = ctypes.sizeof(self.MIB_TCPROW_OWNER_PID)
+        out = {}
+        for i in range(int(n)):
+            row = self.MIB_TCPROW_OWNER_PID.from_buffer(buf, 4 + i * row_size)
+            if row.dwState == 2:          # LISTEN 不算
+                continue
+            out[row.dwOwningPid] = out.get(row.dwOwningPid, 0) + 1
+        return out
+
+    def _sample(self):
+        k = _k32
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        k.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+        k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        k.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(self.PROCESSENTRY32W)]
+        k.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(self.PROCESSENTRY32W)]
+        k.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+        k.OpenProcess.restype = ctypes.c_void_p
+        k.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(wt.FILETIME)] * 4
+        k.CloseHandle.argtypes = [ctypes.c_void_p]
+        psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p,
+                                               ctypes.POINTER(self.PROCESS_MEMORY_COUNTERS),
+                                               wt.DWORD]
+
+        conns = self._conns_by_pid()
+        snap = k.CreateToolhelp32Snapshot(self.SNAP, 0)
+        if not snap or snap == ctypes.c_void_p(-1).value:
+            return
+        now = time.monotonic()
+        cpu_total = cores = None
+        try:
+            cores = os.cpu_count() or 1
+        except Exception:
+            cores = 1
+        rows = []
+        total = 0
+        prev = {}
+        ent = self.PROCESSENTRY32W()
+        ent.dwSize = ctypes.sizeof(self.PROCESSENTRY32W)
+        try:
+            ok = k.Process32FirstW(snap, ctypes.byref(ent))
+            while ok:
+                pid = ent.th32ProcessID
+                name = ent.szExeFile or ""
+                total += 1
+                if pid and name not in ("System Idle Process",):
+                    h = k.OpenProcess(0x1000 | 0x0400, False, pid)
+                    if h:
+                        try:
+                            c, e, kr, us = (wt.FILETIME() for _ in range(4))
+                            if k.GetProcessTimes(h, ctypes.byref(c), ctypes.byref(e),
+                                                 ctypes.byref(kr), ctypes.byref(us)):
+                                t = ((kr.dwHighDateTime << 32) | kr.dwLowDateTime) + \
+                                    ((us.dwHighDateTime << 32) | us.dwLowDateTime)
+                                mc = self.PROCESS_MEMORY_COUNTERS()
+                                mc.cb = ctypes.sizeof(mc)
+                                mem = 0
+                                if psapi.GetProcessMemoryInfo(h, ctypes.byref(mc), mc.cb):
+                                    mem = mc.WorkingSetSize
+                                prev[pid] = (t, mem, now, name)
+                        finally:
+                            k.CloseHandle(h)
+                ok = k.Process32NextW(snap, ctypes.byref(ent))
+        finally:
+            k.CloseHandle(snap)
+
+        old = self._prev
+        self._prev = {pid: (v[0], v[1], v[2]) for pid, v in prev.items()}
+        for pid, (t, mem, ts, name) in prev.items():
+            o = old.get(pid)
+            cpu = 0.0
+            if o:
+                dt = max(0.2, ts - o[2])
+                cpu = 100.0 * (t - o[0]) / (dt * 1e7) / cores
+            rows.append((name, max(0.0, cpu), mem, conns.get(pid, 0)))
+        # 同名进程（浏览器多进程）合并成一行
+        agg = {}
+        for name, cpu, mem, conns in rows:
+            key = name or "?"
+            a = agg.get(key)
+            if a:
+                agg[key] = (a[0] + cpu, a[1] + mem, a[2] + conns)
+            else:
+                agg[key] = (cpu, mem, conns)
+        merged = [(k, v[0], v[1], v[2]) for k, v in agg.items()]
+        merged.sort(key=lambda r: (-r[1], -r[2]))
+        with self.lock:
+            self.top = merged[:4]
+            self.count = len(merged)
+
+    def run(self):
+        while not self._stop:
+            try:
+                self._sample()
+            except Exception:
+                if os.environ.get("DM_DEBUG"):
+                    import traceback
+                    traceback.print_exc()
+            for _ in range(int(self.SNAP * 10)):
+                if self._stop:
+                    return
+                time.sleep(0.1)
 
 class LayeredStrip:
     WM_NCHITTEST = 0x0084
@@ -1203,7 +1373,7 @@ class LayeredStrip:
         self.hwnd = None
 
 class MonitorApp:
-    W, H = 324, 250          # 完整模式（96dpi 设计尺寸）
+    W, H = 324, 322          # 完整模式（96dpi 设计尺寸）
     CW, CH = 190, 72         # 紧凑模式
     STRIP_H = 34             # 任务栏条高度
     PAD = 14
@@ -1213,6 +1383,7 @@ class MonitorApp:
         self.cfg = self.load_cfg()
         dpi_aware()
         self.stats = Stats()
+        self.stats.start()
 
         self.root = tk.Tk()
         self.root.title(APP_NAME)
@@ -2809,7 +2980,7 @@ class MonitorApp:
     def _compose_card(self, W, H):
         from PIL import Image, ImageDraw
         P = CARD_THEMES.get(getattr(self, "card_theme", "dark"), CARD_COLORS)
-        s = H / 250.0
+        s = H / float(self.H)
         SS = 2
         img = Image.new("RGB", (W * SS, H * SS), (0, 0, 0))
         d = ImageDraw.Draw(img)
@@ -2940,6 +3111,25 @@ class MonitorApp:
             d.line([(S(x), S(y)) for x, y in pts], fill=rgb(P["teal"]),
                    width=max(1, int(1.4 * s * SS)), joint="curve")
 
+        # ---- 进程
+        d.line([S(14), S(216), S(DW - 14), S(216)], fill=rgb(P["line"]), width=max(1, SS))
+        procs = st.get("procs") or []
+        cnt = st.get("proc_count") or 0
+        txt(14, 228, "进程", 9, P["dim"], "ls", True)
+        txt(DW - 14, 228, f"共 {cnt} 个 · 按 CPU 排序", 8.5, P["faint"], "rs")
+        yy = 244
+        for name, cpu, mem_b, conns in procs[:3]:
+            nm = name if len(name) <= 16 else name[:15] + "…"
+            txt(14, yy, nm, 8.5, P["text"], "ls")
+            txt(DW * 0.56, yy, f"{cpu:.1f}%", 8.5,
+                P["amber"] if cpu >= 25 else P["dim"], "rs")
+            txt(DW * 0.74, yy, f"{mem_b / 1024 ** 3:.2f} GB", 8.5, P["faint"], "rs")
+            if conns:
+                txt(DW - 14, yy, f"{conns} 链接", 8.5, P["faint"], "rs")
+            yy += 16
+        if not procs:
+            txt(14, 244, "正在采集…", 8.5, P["faint"], "ls")
+
         # ---- 页脚
         free = st.get("disk_free")
         total = st.get("disk_total") or 1
@@ -2949,7 +3139,7 @@ class MonitorApp:
         up_txt = f"{days} 天 {hours} 小时" if days else f"{hours} 小时 {rem % 3600 // 60} 分"
         disk = f"C: 已用 {100 - free / total * 100:.0f}% · 剩余 {free / 1024 ** 3:.0f} GB" if free else ""
         iface = (st.get("ifaces") or [""])[0]
-        txt(14, 234, f"{disk}   ·   已运行 {up_txt}"
+        txt(14, 308, f"{disk}   ·   已运行 {up_txt}"
                      + (f"   ·   {iface}" if iface else ""), 8.5, P["faint"], "ls")
 
         extra = []
@@ -2961,7 +3151,7 @@ class MonitorApp:
         if batt:
             extra.append(f"{'充电中' if batt['ac'] else '电池'} {batt['pct']}%")
         if extra:
-            txt(14, 220, "   ·   ".join(extra), 8.5, P["faint"], "ls")
+            txt(14, 294, "   ·   ".join(extra), 8.5, P["faint"], "ls")
 
         return img.resize((W, H), Image.LANCZOS)
 
