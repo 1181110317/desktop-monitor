@@ -108,6 +108,66 @@ def taskbar_hwnd():
     return _TB_CACHE["hwnd"]
 
 
+def same_monitor(hwnd_a, hwnd_b):
+    """两个窗口是否在同一块显示器上（别的屏全屏不该把主屏的条子藏了）。"""
+    try:
+        u = _u32
+        u.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+        u.MonitorFromWindow.restype = ctypes.c_void_p
+        a = u.MonitorFromWindow(wt.HWND(hwnd_a), 2)
+        b = u.MonitorFromWindow(wt.HWND(hwnd_b), 2)
+        return a == b
+    except Exception:
+        return True
+
+
+def fullscreen_foreground():
+    """前台窗口是否铺满整个显示器（全屏视频/游戏）。"""
+    try:
+        u = _u32
+        u.GetForegroundWindow.restype = wt.HWND
+        u.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
+        hwnd = u.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wt.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == os.getpid():
+            return False
+        cls = ctypes.create_unicode_buffer(256)
+        u.GetClassNameW(hwnd, cls, 256)
+        if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+            return False
+        r = wt.RECT()
+        if not u.GetWindowRect(hwnd, ctypes.byref(r)):
+            return False
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
+                        ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+        u.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+        u.MonitorFromWindow.restype = ctypes.c_void_p
+        u.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+        mon = u.MonitorFromWindow(hwnd, 2)          # NEAREST
+        if not mon:
+            return False
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if not u.GetMonitorInfoW(mon, ctypes.byref(mi)):
+            return False
+        mr = mi.rcMonitor
+        mw = max(1, mr.right - mr.left)
+        mh = max(1, mr.bottom - mr.top)
+        w = r.right - r.left
+        h = r.bottom - r.top
+        # 全屏窗口常带 7px 阴影，不能要求严格相等：宽高都占满 96.5% 且左上角贴边即可
+        return (w / mw >= 0.965 and h / mh >= 0.965
+                and abs(r.left - mr.left) <= 24 and abs(r.top - mr.top) <= 24)
+    except Exception:
+        return False
+
+
 def taskbar_children():
     """Shell_TrayWnd 下各子窗口的位置：托盘左边缘、任务按钮右边缘等。"""
     u = _u32
@@ -1389,6 +1449,14 @@ class LayeredStrip:
             u.ReleaseDC(0, hdc_screen)
 
     # ---------------- 其它
+    def hide(self):
+        if self.hwnd:
+            _u32.ShowWindow(self.hwnd, 0)
+
+    def show(self):
+        if self.hwnd:
+            _u32.ShowWindow(self.hwnd, 5)
+
     def raise_top(self):
         if not self.hwnd:
             return
@@ -1749,6 +1817,9 @@ class MonitorApp:
                 forced = True
             except Exception:
                 log_exc(*sys.exc_info())
+        if getattr(self, "_fs_hidden", False):
+            self.root.after(800, self.dock_loop)
+            return
         if not forced and self.mode == "taskbar":
             try:
                 self.dock_now()
@@ -2636,7 +2707,35 @@ class MonitorApp:
         finally:
             self.root.after(self.interval, self.tick)
 
+    def _sync_fullscreen(self):
+        """有全屏程序时把条子和卡片都藏起来。"""
+        fs = fullscreen_foreground()
+        if fs and self.strip is not None and self.strip.hwnd:
+            fg = _u32.GetForegroundWindow()
+            fs = same_monitor(fg, self.strip.hwnd)
+        if os.environ.get("DM_DEBUG"):
+            print(f"[fs] fullscreen={fs} hidden={getattr(self, '_fs_hidden', False)}",
+                  file=sys.stderr)
+        if fs and not getattr(self, "_fs_hidden", False):
+            self._fs_hidden = True
+            if self.popup:
+                try:
+                    self.hide_detail()
+                except Exception:
+                    pass
+            if self.strip is not None:
+                self.strip.hide()
+        elif not fs and getattr(self, "_fs_hidden", False):
+            self._fs_hidden = False
+            if self.strip is not None:
+                self.strip.show()
+                self.strip.raise_top()
+
     def _tick_once(self):
+        try:
+            self._sync_fullscreen()
+        except Exception:
+            pass
         if self._popup_win:
             self._card_tick = getattr(self, "_card_tick", 0) + 1
             if self._card_tick % 2 == 1:      # 卡片半速刷新，省一半开销
