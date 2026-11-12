@@ -13,7 +13,7 @@
 
 <br>
 
-<img src="docs/images/taskbar.png" width="520" alt="任务栏效果">
+<img src="docs/images/taskbar.png" width="360" alt="任务栏效果">
 
 <sub>贴在托盘左边，背景真透明，看不出是浮窗</sub>
 
@@ -36,7 +36,7 @@
 
 <div align="center">
 
-<img src="docs/images/detail.png" width="430" alt="详情">
+<img src="docs/images/detail.png" width="400" alt="详情">
 
 </div>
 
@@ -53,7 +53,7 @@
 
 <div align="center">
 
-<img src="docs/images/settings.png" width="360" alt="设置">
+<img src="docs/images/settings.png" width="320" alt="设置">
 
 </div>
 
