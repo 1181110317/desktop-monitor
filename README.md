@@ -13,7 +13,7 @@
 
 <br>
 
-<img src="docs/images/taskbar.png" width="360" alt="任务栏效果">
+<img src="docs/images/taskbar.png" width="260" alt="任务栏效果">
 
 <sub>贴在托盘左边，背景真透明，看不出是浮窗</sub>
 
