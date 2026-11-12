@@ -3168,7 +3168,9 @@ class MonitorApp:
         P = CARD_THEMES.get(getattr(self, "card_theme", "dark"), CARD_COLORS)
         s = H / float(self.card_design_h())
         SS = 2
-        img = Image.new("RGB", (W * SS, H * SS), (0, 0, 0))
+        _bg = P["bg"].lstrip("#")
+        img = Image.new("RGB", (W * SS, H * SS),
+                        tuple(int(_bg[i:i + 2], 16) for i in (0, 2, 4)))
         d = ImageDraw.Draw(img)
 
         def S(v):
