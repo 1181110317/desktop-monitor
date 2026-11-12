@@ -996,6 +996,212 @@ def dpi_aware():
         pass
 
 
+
+
+class LayeredStrip:
+    WM_NCHITTEST = 0x0084
+    WM_LBUTTONUP = 0x0202
+    WM_RBUTTONUP = 0x0205
+    WM_PAINT = 0x000F
+    WM_ERASEBKGND = 0x0014
+    HTCLIENT = 1
+
+    def __init__(self, app, title="DshStrip"):
+        self.app = app
+        self.title = title
+        self.hwnd = None
+        self._proc = None
+        self._hinst = None
+        self.x = self.y = 0
+        self.w = self.h = 0
+
+    # ---------------- 创建
+    def create(self, x, y, w, h):
+        u = ctypes.WinDLL("user32", use_last_error=True)
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        # 回调里必须用有原型的 DefWindowProcW，否则 64 位参数溢出会让
+        # 回调返回 0，WM_NCCREATE 返回 FALSE 直接导致创建窗口失败
+        u.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        u.DefWindowProcW.restype = ctypes.c_ssize_t
+
+        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+        def proc(hwnd, msg, wp, lp):
+            try:
+                if msg == self.WM_NCHITTEST:
+                    return self.HTCLIENT
+                if msg == self.WM_PAINT:
+                    return 0
+                if msg == self.WM_ERASEBKGND:
+                    return 1
+                if msg == self.WM_LBUTTONUP:
+                    self.app.root.after(0, self.app.toggle_detail)
+                    return 0
+                if msg == self.WM_RBUTTONUP:
+                    self.app.root.after(0, self.app.open_menu_at_cursor)
+                    return 0
+            except Exception:
+                pass
+            try:
+                if lp and lp > 0x7FFFFFFFFFFFFFFF:
+                    lp -= 1 << 64
+                return u.DefWindowProcW(hwnd, msg, wp, lp)
+            except Exception:
+                return 0
+
+        self._proc = WNDPROC(proc)
+
+        class WNDCLASSW(ctypes.Structure):
+            _fields_ = [
+                ("style", wt.UINT), ("lpfnWndProc", WNDPROC),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON),
+                ("hCursor", wt.HANDLE), ("hbrBackground", wt.HBRUSH),
+                ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR),
+            ]
+
+        k.GetModuleHandleW.restype = ctypes.c_void_p
+        self._hinst = k.GetModuleHandleW(None)
+
+        u.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+        u.RegisterClassW.restype = wt.ATOM
+        wc = WNDCLASSW()
+        wc.lpfnWndProc = self._proc
+        wc.hInstance = self._hinst
+        wc.lpszClassName = self.title
+        atom = u.RegisterClassW(ctypes.byref(wc))
+        if os.environ.get("DM_DEBUG"):
+            print(f"[strip] cls={self.title} atom={atom} hinst={self._hinst}", file=sys.stderr)
+
+        EX = 0x00080000 | 0x00000080 | 0x00000008 | 0x08000000   # LAYERED|TOOLWINDOW|TOPMOST|NOACTIVATE
+        u.CreateWindowExW.argtypes = [wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                      wt.HWND, ctypes.c_void_p, wt.HINSTANCE, ctypes.c_void_p]
+        u.CreateWindowExW.restype = wt.HWND
+        u.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+        self.hwnd = u.CreateWindowExW(EX, self.title, "monitor-strip",
+                                      0x80000000 | 0x10000000,   # WS_POPUP | WS_VISIBLE
+                                      x, y, w, h, None, None, self._hinst, None)
+        self.x, self.y, self.w, self.h = x, y, w, h
+        if not self.hwnd:
+            # 诊断：换最朴素参数再试一次，看是不是某个扩展样式的问题
+            self.hwnd = u.CreateWindowExW(0, self.title, "probe", 0x10000000,
+                                          100, 100, 200, 80, None, None, self._hinst, None)
+            if os.environ.get("DM_DEBUG"):
+                print(f"[strip] retry plain hwnd={self.hwnd} err={ctypes.get_last_error()}",
+                      file=sys.stderr)
+        if os.environ.get("DM_DEBUG"):
+            print(f"[strip] create hwnd={self.hwnd} err={ctypes.get_last_error()}",
+                  file=sys.stderr)
+        return self.hwnd
+
+    # ---------------- 绘制
+    def update(self, img, x=None, y=None):
+        """img: PIL RGBA；None 表示只挪位置。"""
+        if not self.hwnd:
+            return
+        u = ctypes.windll.user32
+        g = ctypes.windll.gdi32
+        if x is not None:
+            self.x, self.y = x, y
+        w, h = img.size if img is not None else (self.w, self.h)
+        self.w, self.h = w, h
+
+        u.GetDC.restype = ctypes.c_void_p
+        u.GetDC.argtypes = [ctypes.c_void_p]
+        u.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        g.CreateCompatibleDC.restype = ctypes.c_void_p
+        g.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+        g.CreateDIBSection.restype = ctypes.c_void_p
+        g.CreateDIBSection.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wt.UINT,
+                                       ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, wt.DWORD]
+        g.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        g.SelectObject.restype = ctypes.c_void_p
+        g.DeleteObject.argtypes = [ctypes.c_void_p]
+        g.DeleteDC.argtypes = [ctypes.c_void_p]
+        u.UpdateLayeredWindow.argtypes = [
+            wt.HWND, ctypes.c_void_p, ctypes.POINTER(wt.POINT), ctypes.POINTER(wt.SIZE),
+            ctypes.c_void_p, ctypes.POINTER(wt.POINT), wt.DWORD, ctypes.c_void_p, wt.DWORD]
+        u.UpdateLayeredWindow.restype = wt.BOOL
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [("biSize", wt.DWORD), ("biWidth", ctypes.c_long),
+                        ("biHeight", ctypes.c_long), ("biPlanes", wt.WORD),
+                        ("biBitCount", wt.WORD), ("biCompression", wt.DWORD),
+                        ("biSizeImage", wt.DWORD), ("biXPelsPerMeter", ctypes.c_long),
+                        ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wt.DWORD),
+                        ("biClrImportant", wt.DWORD)]
+
+        class BITMAPINFO(ctypes.Structure):
+            _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 3)]
+
+        class BLENDFUNCTION(ctypes.Structure):
+            _fields_ = [("BlendOp", wt.BYTE), ("BlendFlags", wt.BYTE),
+                        ("SourceConstantAlpha", wt.BYTE), ("AlphaFormat", wt.BYTE)]
+
+        hdc_screen = u.GetDC(0)
+        mem = g.CreateCompatibleDC(hdc_screen)
+        bi = BITMAPINFO()
+        bi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.bmiHeader.biWidth = w
+        bi.bmiHeader.biHeight = -h            # 自上而下
+        bi.bmiHeader.biPlanes = 1
+        bi.bmiHeader.biBitCount = 32
+        bi.bmiHeader.biCompression = 0
+        bits = ctypes.c_void_p()
+        hbmp = g.CreateDIBSection(hdc_screen, ctypes.byref(bi), 0, ctypes.byref(bits), None, 0)
+        old = g.SelectObject(mem, hbmp)
+        try:
+            if img is not None:
+                # PIL 是直通 alpha，GDI 要预乘
+                src = img.tobytes("raw", "RGBA")
+                buf = bytearray(len(src))
+                for i in range(0, len(src), 4):
+                    a = src[i + 3]
+                    if a == 255:
+                        buf[i:i + 3] = src[i:i + 3]
+                    elif a == 0:
+                        pass
+                    else:
+                        buf[i] = src[i] * a // 255
+                        buf[i + 1] = src[i + 1] * a // 255
+                        buf[i + 2] = src[i + 2] * a // 255
+                    buf[i + 3] = a
+                ctypes.memmove(bits, bytes(buf), len(buf))
+
+            size = wt.SIZE(w, h)
+            dst_pt = wt.POINT(self.x, self.y)
+            src_pt = wt.POINT(0, 0)
+            blend = BLENDFUNCTION(0, 0, 255, 1)     # AC_SRC_OVER / AC_SRC_ALPHA
+            ok = u.UpdateLayeredWindow(self.hwnd, None, ctypes.byref(dst_pt),
+                                       ctypes.byref(size), mem, ctypes.byref(src_pt), 0,
+                                       ctypes.byref(blend), 2)
+            if os.environ.get("DM_DEBUG") and not ok:
+                print(f"[strip] UpdateLayeredWindow failed err={ctypes.get_last_error()}",
+                      file=sys.stderr)
+        finally:
+            g.SelectObject(mem, old)
+            g.DeleteObject(ctypes.c_void_p(hbmp))
+            g.DeleteDC(mem)
+            u.ReleaseDC(0, hdc_screen)
+
+    # ---------------- 其它
+    def raise_top(self):
+        if not self.hwnd:
+            return
+        u = ctypes.windll.user32
+        u.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wt.UINT]
+        u.SetWindowPos(self.hwnd, wt.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+
+    def destroy(self):
+        try:
+            if self.hwnd:
+                ctypes.windll.user32.DestroyWindow(self.hwnd)
+        except Exception:
+            pass
+        self.hwnd = None
+
 class MonitorApp:
     W, H = 324, 250          # 完整模式（96dpi 设计尺寸）
     CW, CH = 190, 72         # 紧凑模式
@@ -1039,6 +1245,8 @@ class MonitorApp:
         self._img_item = None
         self._card_item = None
         self._card_key = None
+        self.strip = None
+        self._strip_pos = None
         self.card_win = None
         self.card_canvas = None
         self._popup_win = False
@@ -1189,8 +1397,10 @@ class MonitorApp:
         # 已经停好且任务栏没变：只校准层级，不再重算，避免尺寸/位置抖动
         if (not force and self._tb_rect
                 and getattr(self, "_tbpos", None) == pos):
-            # 只要任务栏没变就绝不再重排（重排会先隐藏再显示，看着就是"不见了/闪"）
-            if self.root.state() != "normal":
+            # 只要任务栏没变就绝不再重排
+            if self.mode == "taskbar":
+                self.draw_strip()
+            elif self.root.state() != "normal":
                 self.show_window()
             self._raise_above_taskbar()
             return False
@@ -1214,27 +1424,21 @@ class MonitorApp:
             y = ty + 1
 
             rect = (int(x), int(y), int(w), int(h))
-            # 图标位置微抖动时不重排，保持画面稳定
-            if (self._tb_rect and rect[2] == self._tb_rect[2]
-                    and rect[3] == self._tb_rect[3]
-                    and abs(rect[0] - self._tb_rect[0]) <= 12):
-                rect = self._tb_rect
-            if rect != self._tb_rect or self._bg_pil is None:
-                if self.root.state() != "withdrawn":
-                    # 先藏 140ms，让任务栏把露出来的地方重画，再截图当底
-                    self.root.withdraw()
-                    self.root.after(140, lambda: self._finish_dock(x, y, w, h, True))
-                    return True
-                self._finish_dock(x, y, w, h, False)
-                return False
             self._tb_h = h
-            # 托盘宽度会随图标增减变化（几十像素），别因此反复重排——那会闪
-            if (self._tb_rect and not force
-                    and abs(x - self._tb_rect[0]) <= int(26 * self.scale)
-                    and abs(y - self._tb_rect[1]) <= int(8 * self.scale)
-                    and w == self._tb_rect[2] and h == self._tb_rect[3]):
-                self._raise_above_taskbar()
-                return False
+            # 分层窗口：直接按 RGBA 贴上去，没有背景色块，也不需要截图
+            self.root.withdraw()
+            try:
+                if self.strip is None:
+                    self.strip = LayeredStrip(self)
+                    self.strip.create(*rect)
+                self._tb_rect = rect
+                img = self._compose_strip(rect[2], rect[3])
+                self.strip.update(img, rect[0], rect[1])
+                self.strip.raise_top()
+            except Exception:
+                log_exc(*sys.exc_info())
+                self.strip = None
+            return False
         else:
             h = int(round(self.STRIP_H * self.scale))
             margin = int(6 * self.scale)
@@ -1283,11 +1487,16 @@ class MonitorApp:
         """看窗口中心那一点到底是谁的：被任务栏盖住就重新置顶。"""
         try:
             u = _u32
-            hwnd = int(self.root.wm_frame(), 16)
-            if not hwnd or self.root.state() == "withdrawn":
-                return
-            x = self.root.winfo_x() + max(4, self.root.winfo_width() // 2)
-            y = self.root.winfo_y() + max(4, self.root.winfo_height() // 2)
+            if self.strip is not None and self.strip.hwnd:
+                hwnd = self.strip.hwnd
+                x = self.strip.x + max(4, self.strip.w // 2)
+                y = self.strip.y + max(4, self.strip.h // 2)
+            else:
+                hwnd = int(self.root.wm_frame(), 16)
+                if not hwnd or self.root.state() == "withdrawn":
+                    return
+                x = self.root.winfo_x() + max(4, self.root.winfo_width() // 2)
+                y = self.root.winfo_y() + max(4, self.root.winfo_height() // 2)
             under = u.WindowFromPoint(wt.POINT(x, y))
             if not under or under == hwnd or u.IsChild(hwnd, under):
                 return                      # 这个点还是自己的（或没人）
@@ -1315,6 +1524,8 @@ class MonitorApp:
         self.root.after(150, self.top_loop)
 
     def show_window(self):
+        if self.mode == "taskbar" and self.strip is not None:
+            return
         try:
             if self.root.state() == "withdrawn":
                 self.root.deiconify()
@@ -1505,6 +1716,15 @@ class MonitorApp:
             x, y = vx + vw - w - m, vy + vh - h - m
         x = max(0, int(x))
         self.root.geometry(f"{w}x{h}+{x}+{int(y)}")
+
+    def open_menu_at_cursor(self):
+        p = wt.POINT()
+        _u32.GetCursorPos(ctypes.byref(p))
+        m = self.build_menu()
+        try:
+            m.tk_popup(p.x, p.y)
+        finally:
+            m.grab_release()
 
     def tray_menu(self):
         p = wt.POINT()
@@ -1847,17 +2067,18 @@ class MonitorApp:
         self._menu_canvas.delete("all")
         self._menu_canvas.create_image(0, 0, image=self._menu_photo, anchor="nw")
 
-    # ---------------- 设置窗口（原生控件，保证点得动）
+    # ---------------- 设置窗口
     def open_settings(self):
         if getattr(self, "_set_win", None):
             try:
                 self._set_win.deiconify()
                 self._set_win.lift()
+                self._set_win.focus_force()
                 return
             except Exception:
                 self._set_win = None
         P = CARD_THEMES.get(self.card_theme, CARD_COLORS)
-        bg, fg, sub = P["bg"], P["text"], P["dim"]
+        bg, fg, sub, acc = P["bg"], P["text"], P["dim"], P["teal"]
         win = tk.Toplevel(self.root)
         self._set_win = win
         win.title("性能监视器 · 设置")
@@ -1866,12 +2087,19 @@ class MonitorApp:
         win.attributes("-topmost", True)
         win.protocol("WM_DELETE_WINDOW", self._close_settings)
 
-        wrap = tk.Frame(win, bg=bg, padx=18, pady=14)
+        wrap = tk.Frame(win, bg=bg, padx=22, pady=16)
         wrap.pack(fill="both", expand=True)
 
+        tk.Label(wrap, text="外观与行为", bg=bg, fg=fg, anchor="w",
+                 font=self._f(11, "bold")).pack(fill="x")
+        tk.Label(wrap, text="改动立即生效，并写入 config.json", bg=bg, fg=sub,
+                 anchor="w", font=self._f(8.5)).pack(fill="x", pady=(0, 10))
+
         def section(title):
-            tk.Label(wrap, text=title, bg=bg, fg=sub, anchor="w",
-                     font=self._f(8.5)).pack(fill="x", pady=(8, 2))
+            f = tk.Frame(wrap, bg=bg)
+            f.pack(fill="x", pady=(9, 3))
+            tk.Label(f, text=title, bg=bg, fg=sub, anchor="w",
+                     font=self._f(8.5)).pack(side="left")
 
         def radios(title, values, current, cmd):
             section(title)
@@ -1879,13 +2107,38 @@ class MonitorApp:
             row.pack(fill="x", anchor="w")
             var = tk.StringVar(value=str(current))
             for val, label in values:
-                rb = tk.Radiobutton(row, text=label, value=str(val), variable=var,
-                                    command=lambda v=val: cmd(v),
-                                    bg=bg, fg=fg, selectcolor=P["teal"],
-                                    activebackground=bg, activeforeground=fg,
-                                    highlightthickness=0, bd=0, font=self._f(9),
-                                    anchor="w", padx=4, pady=2)
-                rb.pack(side="left", padx=(0, 10))
+                tk.Radiobutton(row, text=label, value=str(val), variable=var,
+                               command=lambda v=val: cmd(v),
+                               bg=bg, fg=fg, selectcolor=acc,
+                               activebackground=bg, activeforeground=fg,
+                               highlightthickness=0, bd=0, font=self._f(9),
+                               anchor="w", padx=3, pady=1, indicatoron=True
+                               ).pack(side="left", padx=(0, 8))
+            return var
+
+        def slider(title, lo, hi, step, current, cmd, fmt):
+            section(title)
+            row = tk.Frame(wrap, bg=bg)
+            row.pack(fill="x")
+            val_lbl = tk.Label(row, text=fmt(current), bg=bg, fg=fg, width=7,
+                               anchor="e", font=self._f(9, "bold"))
+            val_lbl.pack(side="right")
+            var = tk.DoubleVar(value=float(current))
+
+            def on_move(v):
+                val_lbl.configure(text=fmt(float(v)))
+
+            def on_done(v):
+                cmd(float(v))
+
+            sc = tk.Scale(row, from_=lo, to=hi, resolution=step, orient="horizontal",
+                          variable=var, showvalue=False, command=on_move,
+                          bg=P["border"], fg=fg, troughcolor=P["bg"],
+                          activebackground=acc, highlightthickness=0, bd=0,
+                          sliderrelief="raised", length=230, width=12,
+                          sliderlength=22)
+            sc.pack(side="left", fill="x", expand=True, padx=(0, 10))
+            sc.bind("<ButtonRelease-1>", lambda e: on_done(var.get()))
             return var
 
         radios("任务栏样式", [("text", "素净"), ("pill", "胶囊"), ("outline", "描边")],
@@ -1895,33 +2148,38 @@ class MonitorApp:
         radios("详情卡主题", [("dark", "深色"), ("light", "浅色"),
                               ("minimal", "简约"), ("glass", "玻璃")],
                self.card_theme, self.set_card_theme)
-        radios("刷新间隔", [(500, "0.5 秒"), (1000, "1 秒"), (2000, "2 秒"), (5000, "5 秒")],
-               self.interval, self.set_interval)
-        radios("不透明度", [(1.0, "100%"), (0.95, "95%"), (0.9, "90%"), (0.8, "80%")],
-               getattr(self, "alpha", 1.0), self.set_alpha)
+
+        slider("刷新间隔", 0.5, 5.0, 0.5, self.interval / 1000.0,
+               lambda v: self.set_interval(int(v * 1000)), lambda v: f"{v:.1f} 秒")
+        slider("不透明度", 0.30, 1.0, 0.05, getattr(self, "alpha", 1.0),
+               lambda v: self.set_alpha(round(v, 2)), lambda v: f"{int(v * 100)}%")
 
         section("其它")
         row2 = tk.Frame(wrap, bg=bg)
-        row2.pack(fill="x", anchor="w", pady=(0, 4))
-        lock = tk.BooleanVar(value=self.locked)
-        tk.Checkbutton(row2, text="锁定位置", variable=lock, command=self.toggle_lock,
-                       bg=bg, fg=fg, selectcolor=P["teal"], activebackground=bg,
-                       activeforeground=fg, highlightthickness=0, bd=0,
-                       font=self._f(9), padx=4).pack(side="left")
-        au = tk.BooleanVar(value=self.is_autostart())
-        tk.Checkbutton(row2, text="开机自启", variable=au, command=self.toggle_autostart,
-                       bg=bg, fg=fg, selectcolor=P["teal"], activebackground=bg,
-                       activeforeground=fg, highlightthickness=0, bd=0,
-                       font=self._f(9), padx=4).pack(side="left", padx=(12, 0))
+        row2.pack(fill="x", pady=(0, 2))
+        tk.Checkbutton(row2, text="锁定位置", variable=tk.BooleanVar(value=self.locked),
+                       command=self.toggle_lock, bg=bg, fg=fg, selectcolor=P["border"],
+                       activebackground=bg, activeforeground=fg,
+                       highlightthickness=0, bd=0, font=self._f(9), padx=3,
+                       anchor="w").pack(side="left")
+        tk.Checkbutton(row2, text="开机自启", variable=tk.BooleanVar(value=self.is_autostart()),
+                       command=self.toggle_autostart, bg=bg, fg=fg, selectcolor=P["border"],
+                       activebackground=bg, activeforeground=fg,
+                       highlightthickness=0, bd=0, font=self._f(9), padx=3,
+                       anchor="w").pack(side="left", padx=(14, 0))
+
+        line = tk.Frame(wrap, bg=P["border"], height=1)
+        line.pack(fill="x", pady=(14, 12))
 
         row3 = tk.Frame(wrap, bg=bg)
-        row3.pack(fill="x", pady=(10, 0))
+        row3.pack(fill="x")
 
         def btn(parent, text, cmd, color=None):
             b = tk.Button(parent, text=text, command=cmd, bg=P["border"],
                           fg=color or fg, activebackground=P["track"],
                           activeforeground=color or fg, bd=0, relief="flat",
-                          font=self._f(9), padx=10, pady=4, cursor="hand2")
+                          font=self._f(9), padx=12, pady=5, cursor="hand2",
+                          highlightthickness=0)
             b.pack(side="left", padx=(0, 8))
             return b
 
@@ -1929,7 +2187,7 @@ class MonitorApp:
         btn(row3, "展开详情", self.toggle_detail)
         btn(row3, "关闭", self._close_settings, P["red"])
 
-        w, h = 420, 505
+        w, h = 430, 615
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2 - 40
         win.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
@@ -2399,24 +2657,20 @@ class MonitorApp:
         def S(v):
             return v * SS
 
-        base = self.edge_base(W, H)
-
         layer = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
         d = ImageDraw.Draw(layer)
 
         style = getattr(self, "style", "pill")
         if style in ("pill", "outline"):
-            ph = H * 0.84
+            ph = H * 0.86
             py = (H - ph) / 2.0
-            col = self.bar_color()
             if style == "pill":
-                # 用任务栏自己的底色再混一点白，视觉上像一层薄薄的底片
-                k = 0.16 if self.tb_light else 0.10
-                fill = tuple(int(c + (255 - c) * k) for c in col) + (255,)
-                edge = tuple(int(c + (255 - c) * (k + 0.10)) for c in col) + (255,)
+                k = 0.34 if self.tb_light else 0.14
+                fill = (255, 255, 255, int(255 * k))
+                edge = (255, 255, 255, int(255 * min(k + 0.25, 0.9)))
             else:
                 fill = None
-                edge = (0, 0, 0, 34) if self.tb_light else (255, 255, 255, 40)
+                edge = (0, 0, 0, 46) if self.tb_light else (255, 255, 255, 52)
             d.rounded_rectangle([S(3), S(py), S(W - 3), S(py + ph)],
                                 radius=S(ph / 2.0), fill=fill, outline=edge,
                                 width=max(1, SS))
@@ -2464,11 +2718,18 @@ class MonitorApp:
         d.text((vx, y2), fmt_speed(st.get("down"), short=True),
                font=val, fill=P["ink"], anchor="lm")
 
-        out = base.convert("RGBA")
-        out.alpha_composite(layer.resize((W, H), Image.LANCZOS))
-        return out.convert("RGB")
+        return layer.resize((W, H), Image.LANCZOS)
 
     def draw_strip(self):
+        if self.strip is not None and self._tb_rect:
+            try:
+                img = self._compose_strip(self._tb_rect[2], self._tb_rect[3])
+                x, y, w, h = self._tb_rect
+                self.strip.update(img, x, y)
+                self.strip.raise_top()
+                return
+            except Exception:
+                log_exc(*sys.exc_info())
         st = self.state
         sig = (round(st.get("cpu") or -1), round(st.get("mem_pct") or -1),
                fmt_speed(st.get("down"), short=True), fmt_speed(st.get("up"), short=True),
