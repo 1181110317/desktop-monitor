@@ -1650,7 +1650,7 @@ class MonitorApp:
             tray_left = (kids.get("TrayNotifyWnd") or (None,))[0]
             if not tray_left:
                 tray_left = tx + tw - int(250 * self.scale)
-            margin = int(10 * self.scale)
+            margin = int(15 * self.scale)      # 给托盘"^"箭头留出空位
             w = self.strip_w
             x = max(tray_left - margin - w, tx + int(6 * self.scale))
             h = max(24, th - 1)
@@ -1740,7 +1740,16 @@ class MonitorApp:
             pass
 
     def dock_loop(self):
-        if self.mode == "taskbar":
+        # 托盘里的图标会增减、^ 箭头会左右移动，所以定期重算一次位置
+        self._dock_tick = getattr(self, "_dock_tick", 0) + 1
+        forced = False
+        if self._dock_tick % 3 == 0:
+            try:
+                self.dock_now(force=True)
+                forced = True
+            except Exception:
+                log_exc(*sys.exc_info())
+        if not forced and self.mode == "taskbar":
             try:
                 self.dock_now()
             except Exception:
