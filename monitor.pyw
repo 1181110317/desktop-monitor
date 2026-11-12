@@ -1406,7 +1406,7 @@ class LayeredStrip:
         self.hwnd = None
 
 class MonitorApp:
-    W, H = 324, 322          # 完整模式（96dpi 设计尺寸）
+    W, H = 388, 352          # 完整模式（96dpi 设计尺寸）
     CW, CH = 190, 72         # 紧凑模式
     STRIP_H = 34             # 任务栏条高度
     PAD = 14
@@ -3176,23 +3176,34 @@ class MonitorApp:
                    width=max(1, int(1.4 * s * SS)), joint="curve")
 
         # ---- 进程
-        d.line([S(14), S(216), S(DW - 14), S(216)], fill=rgb(P["line"]), width=max(1, SS))
+        d.line([S(14), S(214), S(DW - 14), S(214)], fill=rgb(P["line"]), width=max(1, SS))
         procs = st.get("procs") or []
         cnt = st.get("proc_count") or 0
-        txt(14, 228, "进程", 9, P["dim"], "ls", True)
-        txt(DW - 14, 228, f"共 {cnt} 个 · 按 CPU 排序", 8.5, P["faint"], "rs")
-        yy = 244
+        txt(14, 227, "进程", 9.5, P["dim"], "ls", True)
+        txt(DW - 14, 227, f"共 {cnt} 个 · 按 CPU 排序", 8.5, P["faint"], "rs")
+
+        col_cpu = DW * 0.575
+        col_mem = DW * 0.775
+        col_net = DW - 14
+        # 表头
+        txt(14, 243, "名称", 8, P["faint"], "ls")
+        txt(col_cpu, 243, "CPU", 8, P["faint"], "rs")
+        txt(col_mem, 243, "内存", 8, P["faint"], "rs")
+        txt(col_net, 243, "网络连接", 8, P["faint"], "rs")
+        d.line([S(14), S(248), S(DW - 14), S(248)], fill=rgb(P["line"]), width=max(1, SS))
+
+        yy = 263
         for name, cpu, mem_b, conns in procs[:3]:
-            nm = name if len(name) <= 16 else name[:15] + "…"
-            txt(14, yy, nm, 8.5, P["text"], "ls")
-            txt(DW * 0.56, yy, f"{cpu:.1f}%", 8.5,
-                P["amber"] if cpu >= 25 else P["dim"], "rs")
-            txt(DW * 0.74, yy, f"{mem_b / 1024 ** 3:.2f} GB", 8.5, P["faint"], "rs")
-            if conns:
-                txt(DW - 14, yy, f"{conns} 链接", 8.5, P["faint"], "rs")
-            yy += 16
+            nm = name if len(name) <= 18 else name[:17] + "…"
+            txt(14, yy, nm, 9.5, P["text"], "ls")
+            txt(col_cpu, yy, f"{cpu:.1f} %", 9.5,
+                P["amber"] if cpu >= 25 else P["text"], "rs")
+            txt(col_mem, yy, f"{mem_b / 1024 ** 3:.2f} GB", 9.5, P["dim"], "rs")
+            txt(col_net, yy, f"{conns} 个" if conns else "—", 9.5,
+                P["teal"] if conns else P["faint"], "rs")
+            yy += 19
         if not procs:
-            txt(14, 244, "正在采集…", 8.5, P["faint"], "ls")
+            txt(14, 263, "正在采集…", 9, P["faint"], "ls")
 
         # ---- 页脚
         free = st.get("disk_free")
@@ -3203,7 +3214,7 @@ class MonitorApp:
         up_txt = f"{days} 天 {hours} 小时" if days else f"{hours} 小时 {rem % 3600 // 60} 分"
         disk = f"C: 已用 {100 - free / total * 100:.0f}% · 剩余 {free / 1024 ** 3:.0f} GB" if free else ""
         iface = (st.get("ifaces") or [""])[0]
-        txt(14, 308, f"{disk}   ·   已运行 {up_txt}"
+        txt(14, 338, f"{disk}   ·   已运行 {up_txt}"
                      + (f"   ·   {iface}" if iface else ""), 8.5, P["faint"], "ls")
 
         extra = []
@@ -3215,7 +3226,7 @@ class MonitorApp:
         if batt:
             extra.append(f"{'充电中' if batt['ac'] else '电池'} {batt['pct']}%")
         if extra:
-            txt(14, 294, "   ·   ".join(extra), 8.5, P["faint"], "ls")
+            txt(14, 322, "   ·   ".join(extra), 8.5, P["faint"], "ls")
 
         return img.resize((W, H), Image.LANCZOS)
 
