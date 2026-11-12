@@ -20,6 +20,7 @@
 import ctypes
 import ctypes.wintypes as wt
 import json
+import queue
 import os
 import subprocess
 import sys
@@ -848,12 +849,12 @@ class TrayIcon:
     def _on_msg(self, hwnd, msg, wp, lp):
         if msg == self.WM_TRAY:
             if lp == self.WM_LBUTTONUP:
-                self.app.root.after(0, self.app.toggle_detail)
+                self.app.ui_call("toggle")
             elif lp in (self.WM_RBUTTONUP, self.WM_RBUTTONDOWN, self.WM_CONTEXTMENU):
-                self.app.root.after(0, self.app.tray_menu)
+                self.app.ui_call("menu")
         elif msg == self._msg_taskbar:
             # 资源管理器重启后把图标补回去
-            self.app.root.after(0, self._add_icon)
+            self.app.ui_call("readd_icon")
 
     def remove(self):
         try:
@@ -1233,10 +1234,11 @@ class LayeredStrip:
                 if msg == self.WM_ERASEBKGND:
                     return 1
                 if msg == self.WM_LBUTTONUP:
-                    self.app.root.after(0, self.app.toggle_detail)
+                    # 注意：WndProc 里绝对不能调 Tk（会重入 Tcl 直接崩进程），只投递任务
+                    self.app.ui_call("toggle")
                     return 0
                 if msg == self.WM_RBUTTONUP:
-                    self.app.root.after(0, self.app.open_menu_at_cursor)
+                    self.app.ui_call("menu")
                     return 0
             except Exception:
                 pass
@@ -1447,6 +1449,7 @@ class MonitorApp:
         self._img_item = None
         self._card_item = None
         self._card_key = None
+        self._ui_q = queue.Queue()
         self.strip = None
         self._strip_pos = None
         self.card_win = None
@@ -1500,7 +1503,35 @@ class MonitorApp:
         self.root.bind("<Control-q>", lambda e: self.quit())
         self.root.bind("<Escape>", lambda e: self.hide_detail() if self.popup else None)
 
+        self.root.after(60, self._ui_poll)
         self.tick()
+
+    def ui_call(self, name):
+        """窗口过程里只能调这个（纯 Python 入队，不碰 Tk）。"""
+        try:
+            self._ui_q.put(name)
+        except Exception:
+            pass
+
+    def _ui_poll(self):
+        try:
+            while True:
+                name = self._ui_q.get_nowait()
+                try:
+                    if name == "toggle":
+                        self.toggle_detail()
+                    elif name == "menu":
+                        self.open_menu_at_cursor()
+                    elif name == "readd_icon":
+                        if getattr(self, "tray", None):
+                            self.tray._add_icon()
+                except Exception:
+                    log_exc(*sys.exc_info())
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        self.root.after(60, self._ui_poll)
 
     # ---------------- 字体 / 缩放
     def _pick_fonts(self):
