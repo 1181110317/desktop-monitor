@@ -1915,18 +1915,19 @@ class MonitorApp:
             return
         try:
             down = bool(_u32.GetAsyncKeyState(0x01) & 0x8000)
-            if down and not self._mouse_down:
-                self._mouse_down = True
-                pt = wt.POINT()
-                _u32.GetCursorPos(ctypes.byref(pt))
-                if not self._inside_popup(pt.x, pt.y):
-                    self.hide_detail()
-                    return
-            elif not down:
+            if down:
+                if not self._mouse_down:
+                    self._mouse_down = True
+                    pt = wt.POINT()
+                    _u32.GetCursorPos(ctypes.byref(pt))
+                    if not self._inside_popup(pt.x, pt.y):
+                        self.hide_detail()
+                        return
+            else:
                 self._mouse_down = False
         except Exception:
             pass
-        self.root.after(90, self._popup_watch)
+        self.root.after(28, self._popup_watch)
 
     def hide_detail(self):
         self.popup = False
