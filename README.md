@@ -11,7 +11,7 @@
 ![Deps](https://img.shields.io/badge/deps-Pillow-brightgreen)
 ![Release](https://img.shields.io/github/v/release/1181110317/desktop-monitor?color=2ea043)
 
-<img src="docs/images/taskbar.png" width="820" alt="任务栏效果">
+<img src="docs/images/taskbar.png" width="560" alt="任务栏效果">
 
 </div>
 
