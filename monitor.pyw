@@ -3070,6 +3070,13 @@ class MonitorApp:
             hx = hx.lstrip("#")
             return tuple(int(hx[i:i + 2], 16) for i in (0, 2, 4))
 
+        def mix(c1, c2, t):
+            a = c1.lstrip("#")
+            b = c2.lstrip("#")
+            return "#%02x%02x%02x" % tuple(
+                round(int(a[i:i + 2], 16) * (1 - t) + int(b[i:i + 2], 16) * t)
+                for i in (0, 2, 4))
+
         def F(px, bold=False):
             name = "msyhbd.ttc" if bold else "msyh.ttc"
             return self._font(name, max(8, int(round(px * s * SS))))
@@ -3098,10 +3105,13 @@ class MonitorApp:
         txt(24, 24, "SYSTEM", 9.5, P["dim"], "ls", True)
         if self.popup:
             txt(DW - 62, 24, self.clock, 9, P["faint"], "rs")
-            d.ellipse([S(DW - 31), S(13), S(DW - 13), S(31)], fill=rgb("#1b2431"))
-            txt(DW - 22, 25, "×", 12, P["text"], "ms", True)
-            d.ellipse([S(DW - 56), S(13), S(DW - 38), S(31)], fill=rgb("#1b2431"))
-            txt(DW - 47, 25, "···", 9, P["text"], "ms", True)
+            btn = P["track"] if self.card_theme != "glass" else "#243040"
+            d.ellipse([S(DW - 31), S(13), S(DW - 13), S(31)], fill=rgb(btn),
+                      outline=rgb(P["border"]), width=max(1, SS))
+            txt(DW - 22, 25, "×", 12, P["dim"], "ms", True)
+            d.ellipse([S(DW - 56), S(13), S(DW - 38), S(31)], fill=rgb(btn),
+                      outline=rgb(P["border"]), width=max(1, SS))
+            txt(DW - 47, 25, "···", 9, P["dim"], "ms", True)
         else:
             txt(DW - 14, 24, self.clock, 9, P["faint"], "rs")
         d.line([S(14), S(34), S(DW - 14), S(34)], fill=rgb(P["line"]), width=max(1, SS))
@@ -3121,7 +3131,7 @@ class MonitorApp:
             pts = [(x0 + i * step, y1 - min(hist[i], 100) / 100.0 * (y1 - y0))
                    for i in range(n)]
             d.polygon([(S(pts[0][0]), S(y1))] + [(S(x), S(y)) for x, y in pts] +
-                      [(S(pts[-1][0]), S(y1))], fill=rgb(P["fill"]))
+                      [(S(pts[-1][0]), S(y1))], fill=rgb(mix(P["fill"], P["bg"], 0.45)))
             d.line([(S(x), S(y)) for x, y in pts], fill=rgb(P["teal"]),
                    width=max(1, int(1.6 * s * SS)), joint="curve")
 
