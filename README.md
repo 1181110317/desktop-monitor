@@ -11,6 +11,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-Pillow-brightgreen)
 ![Size](https://img.shields.io/badge/exe-31%20MB-blueviolet)
 ![License](https://img.shields.io/badge/license-MIT-blue)
+![Release](https://img.shields.io/github/v/release/1181110317/desktop-monitor?label=release&color=2ea043)
 
 </div>
 
@@ -74,7 +75,7 @@
 
 ### 方式一：直接用打包好的程序
 
-1. 下载 `DesktopMonitor.exe`
+1. 到 [**Releases**](https://github.com/1181110317/desktop-monitor/releases/latest) 下载 `DesktopMonitor.exe`
 2. 放到**纯英文路径**下（例如 `%LOCALAPPDATA%\Programs\DesktopMonitor\`），中文路径会导致程序启动失败
 3. 双击运行，程序会自动把自己贴到任务栏
 
