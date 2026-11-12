@@ -2731,7 +2731,31 @@ class MonitorApp:
                 self.strip.show()
                 self.strip.raise_top()
 
+    def _check_scale(self):
+        """显示器缩放/分辨率变了（换屏、改缩放）就重建布局，不用重启。"""
+        try:
+            sc = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
+        except Exception:
+            return
+        if abs(sc - self.scale) < 0.02:
+            return
+        self.scale = sc
+        self._font_cache = {}
+        try:
+            self._build_strip()
+        except Exception:
+            log_exc(*sys.exc_info())
+        self._tb_rect = None
+        self._tbpos = None
+        try:
+            self.dock_now(force=True)
+        except Exception:
+            log_exc(*sys.exc_info())
+
     def _tick_once(self):
+        self._scale_tick = getattr(self, "_scale_tick", 0) + 1
+        if self._scale_tick % 5 == 0:
+            self._check_scale()
         try:
             self._sync_fullscreen()
         except Exception:
