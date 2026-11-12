@@ -1014,7 +1014,7 @@ def dpi_aware():
 class ProcReader(threading.Thread):
     """每 2 秒采一次：进程 CPU / 内存 / 活跃 TCP 连接数（不需要管理员权限）。"""
 
-    SNAP = 2
+    SNAP = 3
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -1074,6 +1074,32 @@ class ProcReader(threading.Thread):
             out[row.dwOwningPid] = out.get(row.dwOwningPid, 0) + 1
         return out
 
+    def _window_pids(self):
+        """有可见窗口的进程 id 集合（这类才是用户关心的"软件"）。"""
+        pids = set()
+        try:
+            u = _u32
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+            u.EnumWindows.argtypes = [WNDENUMPROC, wt.LPARAM]
+            u.IsWindowVisible.argtypes = [wt.HWND]
+            u.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+
+            def cb(hwnd, _lp):
+                try:
+                    if u.IsWindowVisible(hwnd):
+                        pid = wt.DWORD()
+                        u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if pid.value:
+                            pids.add(pid.value)
+                except Exception:
+                    pass
+                return True
+
+            u.EnumWindows(WNDENUMPROC(cb), 0)
+        except Exception:
+            pass
+        return pids
+
     def _sample(self):
         k = _k32
         psapi = ctypes.WinDLL("psapi", use_last_error=True)
@@ -1090,6 +1116,8 @@ class ProcReader(threading.Thread):
                                                wt.DWORD]
 
         conns = self._conns_by_pid()
+        interesting = self._window_pids()
+        interesting.update(p for p in self._prev)
         snap = k.CreateToolhelp32Snapshot(self.SNAP, 0)
         if not snap or snap == ctypes.c_void_p(-1).value:
             return
@@ -1110,7 +1138,7 @@ class ProcReader(threading.Thread):
                 pid = ent.th32ProcessID
                 name = ent.szExeFile or ""
                 total += 1
-                if pid and name not in ("System Idle Process",):
+                if pid and pid in interesting:
                     h = k.OpenProcess(0x1000 | 0x0400, False, pid)
                     if h:
                         try:
@@ -1235,10 +1263,13 @@ class LayeredStrip:
 
         u.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
         u.RegisterClassW.restype = wt.ATOM
+        u.LoadCursorW.restype = ctypes.c_void_p
+        u.LoadCursorW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         wc = WNDCLASSW()
         wc.lpfnWndProc = self._proc
         wc.hInstance = self._hinst
         wc.lpszClassName = self.title
+        wc.hCursor = u.LoadCursorW(None, ctypes.c_void_p(32512))   # IDC_ARROW
         atom = u.RegisterClassW(ctypes.byref(wc))
         if os.environ.get("DM_DEBUG"):
             print(f"[strip] cls={self.title} atom={atom} hinst={self._hinst}", file=sys.stderr)
@@ -1570,7 +1601,7 @@ class MonitorApp:
                 and getattr(self, "_tbpos", None) == pos):
             # 只要任务栏没变就绝不再重排
             if self.mode == "taskbar":
-                self.draw_strip()
+                pass                          # 条子由 tick 自己刷，这里只校准层级
             elif self.root.state() != "normal":
                 self.show_window()
             self._raise_above_taskbar()
@@ -1655,25 +1686,25 @@ class MonitorApp:
                   file=sys.stderr)
 
     def _raise_above_taskbar(self):
-        """看窗口中心那一点到底是谁的：被任务栏盖住就重新置顶。"""
+        """分层窗口每两秒无条件抬一次（幂等、开销极小）；其它模式仍用命中点判断。"""
         try:
             u = _u32
             if self.strip is not None and self.strip.hwnd:
-                hwnd = self.strip.hwnd
-                x = self.strip.x + max(4, self.strip.w // 2)
-                y = self.strip.y + max(4, self.strip.h // 2)
-            else:
-                hwnd = int(self.root.wm_frame(), 16)
-                if not hwnd or self.root.state() == "withdrawn":
+                now = time.time()
+                if now - getattr(self, "_raise_ts", 0) < 1.8:
                     return
-                x = self.root.winfo_x() + max(4, self.root.winfo_width() // 2)
-                y = self.root.winfo_y() + max(4, self.root.winfo_height() // 2)
+                self._raise_ts = now
+                self.strip.raise_top()
+                return
+            hwnd = int(self.root.wm_frame(), 16)
+            if not hwnd or self.root.state() == "withdrawn":
+                return
+            x = self.root.winfo_x() + max(4, self.root.winfo_width() // 2)
+            y = self.root.winfo_y() + max(4, self.root.winfo_height() // 2)
             under = u.WindowFromPoint(wt.POINT(x, y))
             if not under or under == hwnd or u.IsChild(hwnd, under):
-                return                      # 这个点还是自己的（或没人）
-
-            u.SetWindowPos(hwnd, -1, 0, 0, 0, 0,   # HWND_TOPMOST
-                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+                return
+            u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
         except Exception:
             pass
 
@@ -1692,7 +1723,7 @@ class MonitorApp:
                 self._raise_above_taskbar()
             except Exception:
                 pass
-        self.root.after(150, self.top_loop)
+        self.root.after(700, self.top_loop)
 
     def show_window(self):
         if self.mode == "taskbar" and self.strip is not None:
@@ -2553,10 +2584,12 @@ class MonitorApp:
 
     def _tick_once(self):
         if self._popup_win:
-            try:
-                self.draw_card()
-            except Exception:
-                log_exc(*sys.exc_info())
+            self._card_tick = getattr(self, "_card_tick", 0) + 1
+            if self._card_tick % 2 == 1:      # 卡片半速刷新，省一半开销
+                try:
+                    self.draw_card()
+                except Exception:
+                    log_exc(*sys.exc_info())
         try:
             self.state = self.stats.sample()
         except Exception:
