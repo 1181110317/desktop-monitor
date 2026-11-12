@@ -161,9 +161,9 @@ def fullscreen_foreground():
         mh = max(1, mr.bottom - mr.top)
         w = r.right - r.left
         h = r.bottom - r.top
-        # 全屏窗口常带 7px 阴影，不能要求严格相等：宽高都占满 96.5% 且左上角贴边即可
-        return (w / mw >= 0.965 and h / mh >= 0.965
-                and abs(r.left - mr.left) <= 24 and abs(r.top - mr.top) <= 24)
+        # 真全屏会盖住任务栏（下边缘直达屏幕底）；最大化窗口只到工作区，靠这个区分
+        return (w / mw >= 0.99 and h / mh >= 0.99
+                and r.top <= mr.top + 4 and r.bottom >= mr.bottom - 4)
     except Exception:
         return False
 
@@ -3075,7 +3075,10 @@ class MonitorApp:
         d.text((vx, y2), fmt_speed(st.get("down"), short=True),
                font=val, fill=P["ink"], anchor="lm")
 
-        return layer.resize((W, H), Image.LANCZOS)
+        out = layer.resize((W, H), Image.LANCZOS)
+        # 分层窗口按 alpha 做命中测试：全透明的地方点不到，所以整体抬到 1/255（肉眼不可见）
+        out.putalpha(out.getchannel("A").point(lambda v: v if v > 1 else 1))
+        return out
 
     def draw_strip(self):
         if self.strip is not None and self._tb_rect:
@@ -3367,7 +3370,13 @@ class MonitorApp:
         if extra:
             txt(14, 322 + dy, "   ·   ".join(extra), 8.5, P["faint"], "ls")
 
-        return img.resize((W, H), Image.LANCZOS)
+        small = img.resize((W, H), Image.LANCZOS)
+        # 圆角之外直接填透明色键：边缘是硬的（不做半透明过渡），不会出现彩色描边
+        mask = Image.new("L", (W * SS, H * SS), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [S(0.5), S(0.5), S(DW - 0.5), S(H / s - 0.5)], radius=S(13), fill=255)
+        hard = mask.resize((W, H), Image.LANCZOS).point(lambda v: 255 if v >= 128 else 0)
+        return Image.composite(small, Image.new("RGB", (W, H), (255, 0, 254)), hard)
 
     def draw_full(self):
         c = self.canvas
