@@ -25,7 +25,7 @@
 - **零服务零联网**：采样全走 Windows API，只有渲染用 Pillow
 - **崩溃自愈**：看门狗每 3 分钟检查，进程没了自动拉起
 
-<img src="docs/images/detail.png" width="470" alt="详情">
+<img src="docs/images/detail.png" width="440" alt="详情">
 
 <table>
 <tr>
