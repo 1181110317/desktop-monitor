@@ -1181,7 +1181,7 @@ class ProcReader(threading.Thread):
         merged = [(k, v[0], v[1], v[2]) for k, v in agg.items()]
         merged.sort(key=lambda r: (-r[1], -r[2]))
         with self.lock:
-            self.top = merged[:4]
+            self.top = merged[:8]
             self.count = len(merged)
 
     def run(self):
@@ -1812,9 +1812,12 @@ class MonitorApp:
         self.card_win = w
         self.card_canvas = c
 
+    def card_design_h(self):
+        return self.H + (95 if getattr(self, "_proc_expanded", False) else 0)
+
     def card_rect(self):
         w = int(round(self.W * self.scale))
-        h = int(round(self.H * self.scale))
+        h = int(round(self.card_design_h() * self.scale))
         m = int(8 * self.scale)
         pos = taskbar_position()
         if pos:
@@ -1872,9 +1875,19 @@ class MonitorApp:
             self._popup_key = key
         else:
             c.itemconfigure(self._popup_item, image=self._card_photo)
-        self._close_box = (W / self.scale - 33, 11, W / self.scale - 11, 33)
+        dw = W / self.scale
+        self._close_box = (dw - 33, 11, dw - 11, 33)
+        self._gear_box = (dw - 58, 11, dw - 36, 33)
+        self._expand_box = (dw - 130, 216, dw - 10, 238)
 
     def on_card_press(self, e):
+        if getattr(self, "_expand_box", None):
+            x1, y1, x2, y2 = [self.s(v) for v in self._expand_box]
+            if x1 <= e.x <= x2 and y1 <= e.y <= y2:
+                self._proc_expanded = not getattr(self, "_proc_expanded", False)
+                self._card_key = None
+                self.show_popup()
+                return
         if getattr(self, "_gear_box", None):
             x1, y1, x2, y2 = [self.s(v) for v in self._gear_box]
             if x1 <= e.x <= x2 and y1 <= e.y <= y2:
@@ -3044,7 +3057,7 @@ class MonitorApp:
     def _compose_card(self, W, H):
         from PIL import Image, ImageDraw
         P = CARD_THEMES.get(getattr(self, "card_theme", "dark"), CARD_COLORS)
-        s = H / float(self.H)
+        s = H / float(self.card_design_h())
         SS = 2
         img = Image.new("RGB", (W * SS, H * SS), (0, 0, 0))
         d = ImageDraw.Draw(img)
@@ -3179,8 +3192,11 @@ class MonitorApp:
         d.line([S(14), S(214), S(DW - 14), S(214)], fill=rgb(P["line"]), width=max(1, SS))
         procs = st.get("procs") or []
         cnt = st.get("proc_count") or 0
+        exp = getattr(self, "_proc_expanded", False)
         txt(14, 227, "进程", 9.5, P["dim"], "ls", True)
-        txt(DW - 14, 227, f"共 {cnt} 个 · 按 CPU 排序", 8.5, P["faint"], "rs")
+        txt(DW - 14, 227,
+            (f"共 {cnt} 个 · 点击收起" if exp else f"共 {cnt} 个 · 点击展开"), 8.5,
+            P["teal"] if exp else P["faint"], "rs")
 
         col_cpu = DW * 0.575
         col_mem = DW * 0.775
@@ -3193,7 +3209,8 @@ class MonitorApp:
         d.line([S(14), S(248), S(DW - 14), S(248)], fill=rgb(P["line"]), width=max(1, SS))
 
         yy = 263
-        for name, cpu, mem_b, conns in procs[:3]:
+        n_show = 8 if exp else 3
+        for name, cpu, mem_b, conns in procs[:n_show]:
             nm = name if len(name) <= 18 else name[:17] + "…"
             txt(14, yy, nm, 9.5, P["text"], "ls")
             txt(col_cpu, yy, f"{cpu:.1f} %", 9.5,
@@ -3213,8 +3230,9 @@ class MonitorApp:
         hours = rem // 3600
         up_txt = f"{days} 天 {hours} 小时" if days else f"{hours} 小时 {rem % 3600 // 60} 分"
         disk = f"C: 已用 {100 - free / total * 100:.0f}% · 剩余 {free / 1024 ** 3:.0f} GB" if free else ""
+        dy = 95 if getattr(self, "_proc_expanded", False) else 0
         iface = (st.get("ifaces") or [""])[0]
-        txt(14, 338, f"{disk}   ·   已运行 {up_txt}"
+        txt(14, 338 + dy, f"{disk}   ·   已运行 {up_txt}"
                      + (f"   ·   {iface}" if iface else ""), 8.5, P["faint"], "ls")
 
         extra = []
@@ -3226,7 +3244,7 @@ class MonitorApp:
         if batt:
             extra.append(f"{'充电中' if batt['ac'] else '电池'} {batt['pct']}%")
         if extra:
-            txt(14, 322, "   ·   ".join(extra), 8.5, P["faint"], "ls")
+            txt(14, 322 + dy, "   ·   ".join(extra), 8.5, P["faint"], "ls")
 
         return img.resize((W, H), Image.LANCZOS)
 
