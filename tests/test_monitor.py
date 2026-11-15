@@ -172,6 +172,20 @@ class TaskbarMeasurementsTests(unittest.TestCase):
         self.assertEqual([(m["value"], m["unit"]) for m in metrics],
                          [("12.5", "MB/s"), ("840", "KB/s"), ("1.0", "GB"), ("0", "B")])
 
+    def test_classic_spacing_never_reduces_original_font_sizes(self):
+        app = mon.MonitorApp.__new__(mon.MonitorApp)
+        app.scale, app._font_cache = 1.5, {}
+        app.cfg = {**mon.STRIP_DEFAULTS, "strip_profile": "balanced"}
+        app.state = {"cpu": 100, "mem_pct": 68, "up": 840000, "down": 12600000}
+        widths = []
+        for spacing in mon.STRIP_SIZES:
+            app.cfg["strip_size"] = spacing
+            geometry = app._classic_geometry()
+            self.assertEqual((geometry["label_px"], geometry["value_px"]), (13, 19))
+            self.assertEqual([m["key"] for m in geometry["records"]], ["cpu", "mem", "up", "down"])
+            widths.append(geometry["width"])
+        self.assertLess(widths[0], widths[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

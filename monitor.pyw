@@ -33,7 +33,7 @@ from contextlib import contextmanager
 import math
 
 APP_NAME = "桌面性能监视器"
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 RESOURCES = getattr(sys, "_MEIPASS", BASE)
 DATA_DIR = (os.path.join(os.environ.get("LOCALAPPDATA", BASE), "DesktopMonitor")
@@ -85,9 +85,9 @@ CARD_THEMES = {
 
 STRIP_STYLES = {"minimal": "融入", "glass": "雾面", "tiles": "分舱",
                 "outline": "细线", "ribbon": "能量", "neon": "霓虹"}
-STRIP_LAYOUTS = {"micro": ("紧凑", 148), "duo": ("双行", 188), "inline": ("横排", 228),
+STRIP_LAYOUTS = {"classic": ("首版", 148), "micro": ("微型", 148), "duo": ("双行", 188), "inline": ("横排", 228),
                  "gauges": ("圆环", 190), "trends": ("趋势", 244)}
-STRIP_HEIGHTS = {"micro": 28, "duo": 32, "inline": 32, "gauges": 32, "trends": 32}
+STRIP_HEIGHTS = {"classic": 40, "micro": 28, "duo": 32, "inline": 32, "gauges": 32, "trends": 32}
 STRIP_PROFILES = {
     "balanced": ("均衡", ("cpu", "mem", "down", "up")),
     "hardware": ("硬件", ("cpu", "mem", "gpu", "gpu_temp")),
@@ -98,7 +98,7 @@ STRIP_PROFILE_HINTS = {"balanced": "CPU · 内存 · 下载 · 上传", "hardwar
                        "network": "下载 · 上传 · 累计收发", "battery": "CPU · 内存 · 电池 · 运行时长"}
 STRIP_ACCENTS = {"mint": "薄荷", "blue": "冰川", "violet": "鸢尾", "amber": "琥珀", "mono": "单色"}
 STRIP_SIZES = {"small": ("小巧", 0.88), "normal": ("标准", 1.0), "large": ("清晰", 1.12)}
-STRIP_DEFAULTS = {"style": "minimal", "strip_layout": "micro", "strip_profile": "balanced",
+STRIP_DEFAULTS = {"style": "minimal", "strip_layout": "classic", "strip_profile": "balanced",
                   "strip_accent": "mono", "strip_size": "small"}
 STRIP_CHOICES = {"style": STRIP_STYLES, "strip_layout": STRIP_LAYOUTS, "strip_profile": STRIP_PROFILES,
                  "strip_accent": STRIP_ACCENTS, "strip_size": STRIP_SIZES}
@@ -1608,7 +1608,7 @@ class StripPainter:
         if self.style == "minimal":
             return
         if self.style == "tiles":
-            count = 2 if self.layout in ("duo", "micro") else 4
+            count = 2 if self.layout in ("classic", "duo", "micro") else 4
             gap, pad = 3, 2
             width = (self.dw - 2 * pad - gap * (count - 1)) / count
             for i in range(count):
@@ -2107,7 +2107,7 @@ class MonitorApp:
         tx, ty, tw, th, edge = pos
         w = self.strip_w
         margin = round(8 * self.scale)
-        density = STRIP_SIZES[self.cfg["strip_size"]][1]
+        density = 1.0 if self.cfg["strip_layout"] == "classic" else STRIP_SIZES[self.cfg["strip_size"]][1]
         content_h = round(STRIP_HEIGHTS[self.cfg["strip_layout"]] * self.scale * density)
         if edge in (1, 3):
             kids = taskbar_children()
@@ -2456,8 +2456,12 @@ class MonitorApp:
         if label is None or not label.winfo_exists():
             return
         scale = min(self.scale, self.work_area()[2] / 480) * STRIP_SIZES[self.cfg["strip_size"]][1]
-        width = round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * scale)
-        height = round(STRIP_HEIGHTS[self.cfg["strip_layout"]] * scale)
+        if self.cfg["strip_layout"] == "classic":
+            width = self._classic_geometry()["width"]
+            height = round(40 * self.scale) + 2
+        else:
+            width = round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * scale)
+            height = round(STRIP_HEIGHTS[self.cfg["strip_layout"]] * scale)
         bg = (235, 240, 248, 255) if self.palette()["light"] else (16, 23, 35, 255)
         image = Image.new("RGBA", (width, height), bg)
         image.alpha_composite(self._compose_strip(width, height))
@@ -2742,14 +2746,14 @@ class MonitorApp:
         font = lambda n, bold=False: (self.f_cn, -px(n), "bold" if bold else "normal")
         header = tk.Frame(win, bg=p["bg"], padx=px(14), pady=px(10))
         header.pack(fill="x")
-        tk.Label(header, text="偏好设置", font=font(16, True), bg=p["bg"], fg=p["text"], anchor="w").pack(fill="x")
+        tk.Label(header, text="偏好设置", font=font(18, True), bg=p["bg"], fg=p["text"], anchor="w").pack(fill="x")
         navigation = tk.Frame(win, bg=p["bg"], padx=px(14))
         navigation.pack(fill="x", pady=(0, px(8)))
 
         def button(parent, label, command, selected=False, primary=False):
             bg = p["teal"] if primary else (p["track"] if selected else p["surface"])
             fg = p["bg"] if primary else (p["teal"] if selected else p["dim"])
-            b = tk.Button(parent, text=label, command=command, font=font(10, selected or primary),
+            b = tk.Button(parent, text=label, command=command, font=font(12, selected or primary),
                 bg=bg, fg=fg, activebackground=p["track"], activeforeground=p["text"],
                 bd=0, relief="flat", highlightthickness=1, highlightbackground=p["border"],
                 highlightcolor=p["teal"], cursor="hand2", padx=px(7), pady=px(5), takefocus=True)
@@ -2771,7 +2775,7 @@ class MonitorApp:
             live.pack(fill="x", padx=px(14), pady=(0, px(8)))
             top = tk.Frame(live, bg=p["bg"])
             top.pack(fill="x")
-            tk.Label(top, text="实际大小预览", bg=p["bg"], fg=p["dim"], font=font(10, True)).pack(side="left")
+            tk.Label(top, text="实际大小预览", bg=p["bg"], fg=p["dim"], font=font(11, True)).pack(side="left")
             self._settings_preview_label = tk.Label(live, bg=p["surface"], bd=0)
             self._settings_preview_label.pack(anchor="center", pady=(px(3), 0))
             self.refresh_settings_preview()
@@ -2805,9 +2809,9 @@ class MonitorApp:
             frame = tk.Frame(content, bg=p["surface"], padx=px(10), pady=px(7),
                              highlightthickness=1, highlightbackground=p["border"])
             frame.pack(fill="x", pady=(0, px(6)))
-            tk.Label(frame, text=title, font=font(10, True), bg=p["surface"], fg=p["text"], anchor="w").pack(fill="x")
+            tk.Label(frame, text=title, font=font(12, True), bg=p["surface"], fg=p["text"], anchor="w").pack(fill="x")
             if subtitle:
-                label = tk.Label(frame, text=subtitle, font=font(9), bg=p["surface"], fg=p["dim"], anchor="w", justify="left", wraplength=px(470))
+                label = tk.Label(frame, text=subtitle, font=font(11), bg=p["surface"], fg=p["dim"], anchor="w", justify="left", wraplength=px(470))
                 label.pack(fill="x", pady=(px(4), px(3)))
                 frame.bind("<Configure>", lambda e: label.configure(wraplength=max(px(200), e.width - px(34))))
             return frame
@@ -2824,7 +2828,7 @@ class MonitorApp:
                 for val, control in buttons:
                     control._normal_bg = p["track"] if val == value else p["surface"]
                     control.configure(bg=p["track"] if val == value else p["surface"],
-                                      fg=p["teal"] if val == value else p["dim"], font=font(10, val == value))
+                                      fg=p["teal"] if val == value else p["dim"], font=font(12, val == value))
             for i, (value, label) in enumerate(options):
                 row.columnconfigure(i, weight=1, uniform=title)
                 control = button(row, label, lambda v=value: select(v), value == current)
@@ -2880,8 +2884,11 @@ class MonitorApp:
                      STRIP_PROFILE_HINTS[self.cfg["strip_profile"]])
             segments("强调色", list(STRIP_ACCENTS.items()), self.cfg["strip_accent"],
                      lambda value: self.set_strip_option("strip_accent", value))
-            segments("显示尺寸", [(key, item[0]) for key, item in STRIP_SIZES.items()], self.cfg["strip_size"],
-                     lambda value: self.set_strip_option("strip_size", value))
+            classic = self.cfg["strip_layout"] == "classic"
+            segments("内容间距" if classic else "显示尺寸",
+                     [(key, {"small": "紧凑", "normal": "标准", "large": "宽松"}[key] if classic else item[0]) for key, item in STRIP_SIZES.items()],
+                     self.cfg["strip_size"], lambda value: self.set_strip_option("strip_size", value),
+                     "首版字号固定，间距调整不会缩小文字。" if classic else "")
             segments("任务栏字色", [("auto", "自动适配"), ("dark", "深色文字"), ("light", "浅色文字")], self.theme, self.set_theme)
             def indicators(value):
                 self.cfg["strip_indicators"] = value
@@ -3174,9 +3181,86 @@ class MonitorApp:
 
     def _build_strip(self):
         density = STRIP_SIZES[self.cfg["strip_size"]][1]
-        self.strip_w = round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * self.scale * density)
+        if self.cfg["strip_layout"] == "classic":
+            self.strip_w = self._classic_geometry()["width"]
+        else:
+            self.strip_w = round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * self.scale * density)
         self._strip_key = None
         self._img_item = None
+
+    def _classic_geometry(self, **options):
+        """Keep the first release's font sizes; compactness changes spacing, never glyph size."""
+        scale = self.scale
+        spacing = STRIP_SIZES[options.get("strip_size", self.cfg["strip_size"])][1]
+        label_px, value_px = max(8, round(8.6 * scale)), max(10, round(12.8 * scale))
+        label_font = self._font("segoeui.ttf", label_px)
+        value_font = self._font("seguisb.ttf", value_px)
+        profile = options.get("strip_profile", self.cfg["strip_profile"])
+        metrics = strip_metrics(getattr(self, "state", {}), profile)
+        if profile == "balanced":
+            metrics = [metrics[0], metrics[1], metrics[3], metrics[2]]
+        labels = {"cpu": "CPU", "mem": "RAM", "gpu": "GPU", "gpu_temp": "TEMP",
+                  "battery": "BAT", "uptime": "ON", "up": "↑", "down": "↓",
+                  "total_down": "Σ↓", "total_up": "Σ↑"}
+        records = []
+        for metric in metrics:
+            key, raw = metric["key"], metric["raw"]
+            rate = key in ("up", "down")
+            value = fmt_speed(raw, short=True) if rate else metric["value"]
+            unit = "" if rate else metric["unit"]
+            reserve = "999.9M" if rate else ("99d 23h" if key == "uptime" else ("999.9" if key.startswith("total_") else "100"))
+            records.append(dict(metric, tag=labels[key], value=value, unit=unit, rate=rate, reserve=reserve))
+        pad, gap, unit_gap = 8 * scale * spacing, 4 * scale * spacing, 2 * scale * spacing
+        column_gap = 12 * scale * spacing
+        columns = []
+        x = pad
+        for pair in (records[:2], records[2:]):
+            label_width = max((value_font if m["rate"] else label_font).getlength(m["tag"]) for m in pair)
+            number_width = max(value_font.getlength(m["reserve"]) for m in pair)
+            # No automatic font shrinking when a reading needs more room.
+            number_width = max(number_width, *(value_font.getlength(m["value"]) for m in pair))
+            unit_width = max(label_font.getlength(m["unit"] or ("%" if m["key"] in ("cpu", "mem", "gpu", "battery")
+                                   else ("°C" if m["key"] == "gpu_temp" else ("GB" if m["key"].startswith("total_") else "")))) for m in pair)
+            number_x = x + label_width + gap
+            end = number_x + number_width
+            width = label_width + gap + number_width + (unit_gap + unit_width if unit_width else 0)
+            columns.append(dict(label=x, number=number_x, end=end, unit=end + unit_gap, width=width))
+            x += width + column_gap
+        return dict(width=round(x - column_gap + pad), label_px=label_px, value_px=value_px,
+                    columns=columns, records=records, separator=columns[0]["label"] + columns[0]["width"] + column_gap / 2)
+
+    def _compose_classic(self, W, H, **options):
+        geometry = self._classic_geometry(**options)
+        painter = StripPainter(self, W, H, **options)
+        painter.dw, painter.scale, painter.k = W / self.scale, self.scale, self.scale * 3
+        painter.ox, painter.oy = 0, (H - 40 * self.scale) / 2
+        painter.background()
+        image, draw = painter.image, painter.d
+        palette = self.palette()
+        ink = (20, 22, 26) if palette["light"] else (243, 245, 248)
+        dim = (77, 83, 92) if palette["light"] else (170, 180, 194)
+        label = self._font("segoeui.ttf", geometry["label_px"] * 3)
+        value_font = self._font("seguisb.ttf", geometry["value_px"] * 3)
+        draw.line([(geometry["separator"] * 3, H * .24 * 3),
+                   (geometry["separator"] * 3, H * .76 * 3)],
+                  fill=(*ink, 22), width=max(1, round(self.scale)))
+        for index, metric in enumerate(geometry["records"]):
+            column = geometry["columns"][index // 2]
+            y = H * (.32 if index % 2 == 0 else .68) * 3
+            tag_color = palette["blue"] if metric["key"] == "up" else (palette["teal"] if metric["key"] == "down" else dim)
+            draw.text((column["label"] * 3, y), metric["tag"], font=value_font if metric["rate"] else label,
+                      fill=tag_color, anchor="lm")
+            color = palette["red"] if metric["key"] == "mem" and (metric["raw"] or 0) >= 90 else ink
+            if metric["rate"]:
+                draw.text((column["number"] * 3, y), metric["value"], font=value_font, fill=color, anchor="lm")
+            else:
+                draw.text((column["end"] * 3, y), metric["value"], font=value_font, fill=color, anchor="rm")
+                if metric["unit"]:
+                    draw.text((column["unit"] * 3, y), metric["unit"], font=label, fill=dim, anchor="lm")
+        result = image.resize((W, H), Image.Resampling.LANCZOS)
+        alpha = float(self.cfg.get("alpha", 1.0))
+        result.putalpha(result.getchannel("A").point(lambda opacity: max(1, round(opacity * alpha))))
+        return result
 
     # 任务栏取色 / 文字配色
     def palette(self):
@@ -3229,6 +3313,8 @@ class MonitorApp:
             pass
 
     def _compose_strip(self, W, H, **options):
+        if options.get("strip_layout", self.cfg["strip_layout"]) == "classic":
+            return self._compose_classic(W, H, **options)
         return StripPainter(self, W, H, **options).render()
 
     def draw_strip(self):
