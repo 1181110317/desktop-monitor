@@ -144,5 +144,34 @@ class ThreadLifecycleTests(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
 
 
+class TaskbarPreferencesTests(unittest.TestCase):
+    load = ConfigurationTests.load
+
+    def test_legacy_styles_migrate_without_losing_other_preferences(self):
+        for old, new in (("text", "minimal"), ("pill", "glass"), ("outline", "outline")):
+            cfg = self.load(json.dumps({"style": old, "interval": 2000, "card_theme": "light"}))
+            self.assertEqual((cfg["style"], cfg["interval"], cfg["card_theme"]), (new, 2000, "light"))
+
+    def test_invalid_taskbar_options_use_supported_defaults(self):
+        cfg = self.load(json.dumps({"style": [], "strip_layout": {}, "strip_profile": "unknown",
+                                    "strip_accent": None, "strip_size": 100, "strip_indicators": "false"}))
+        for key, default in mon.STRIP_DEFAULTS.items():
+            self.assertEqual(cfg[key], default)
+        self.assertTrue(cfg["strip_indicators"])
+
+
+class TaskbarMeasurementsTests(unittest.TestCase):
+    def test_zero_gpu_and_empty_battery_are_not_missing(self):
+        state = {"cpu": 0, "mem_pct": 0, "gpu": {"util": 0, "temp": None}, "battery": {"pct": 0}}
+        hardware = mon.strip_metrics(state, "hardware")
+        self.assertEqual([metric["value"] for metric in hardware], ["0", "0", "0", "—"])
+        self.assertEqual(mon.strip_metrics(state, "battery")[2]["value"], "0")
+
+    def test_network_profile_distinguishes_rates_from_session_totals(self):
+        metrics = mon.strip_metrics({"down": 12_500_000, "up": 840_000, "total_down": 1024 ** 3, "total_up": 0}, "network")
+        self.assertEqual([(m["value"], m["unit"]) for m in metrics],
+                         [("12.5", "MB/s"), ("840", "KB/s"), ("1.0", "GB"), ("0", "B")])
+
+
 if __name__ == "__main__":
     unittest.main()

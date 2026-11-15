@@ -33,7 +33,7 @@ from contextlib import contextmanager
 import math
 
 APP_NAME = "桌面性能监视器"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 RESOURCES = getattr(sys, "_MEIPASS", BASE)
 DATA_DIR = (os.path.join(os.environ.get("LOCALAPPDATA", BASE), "DesktopMonitor")
@@ -81,6 +81,59 @@ CARD_THEMES = {
                   teal="#79e5cf", amber="#ffd288", red="#ff989c",
                   violet="#ccbcff", blue="#9dcaff", fill="#294b53"),
 }
+
+
+STRIP_STYLES = {"minimal": "融入", "glass": "雾面", "tiles": "分舱",
+                "outline": "细线", "ribbon": "能量", "neon": "霓虹"}
+STRIP_LAYOUTS = {"duo": ("双行", 218), "inline": ("横排", 282),
+                 "gauges": ("圆环", 258), "trends": ("趋势", 298)}
+STRIP_PROFILES = {
+    "balanced": ("均衡", ("cpu", "mem", "down", "up")),
+    "hardware": ("硬件", ("cpu", "mem", "gpu", "gpu_temp")),
+    "network": ("网络", ("down", "up", "total_down", "total_up")),
+    "battery": ("续航", ("cpu", "mem", "battery", "uptime")),
+}
+STRIP_ACCENTS = {"mint": "薄荷", "blue": "冰川", "violet": "鸢尾", "amber": "琥珀", "mono": "单色"}
+STRIP_SIZES = {"small": ("小巧", 0.88), "normal": ("标准", 1.0), "large": ("清晰", 1.12)}
+STRIP_DEFAULTS = {"style": "tiles", "strip_layout": "inline", "strip_profile": "balanced",
+                  "strip_accent": "mint", "strip_size": "normal"}
+STRIP_CHOICES = {"style": STRIP_STYLES, "strip_layout": STRIP_LAYOUTS, "strip_profile": STRIP_PROFILES,
+                 "strip_accent": STRIP_ACCENTS, "strip_size": STRIP_SIZES}
+
+
+def strip_metrics(state, profile="balanced"):
+    """Format the four selected measurements, keeping missing readings distinct from zero."""
+    gpu = state.get("gpu") or {}
+    battery = state.get("battery") or {}
+    values = {"cpu": state.get("cpu"), "mem": state.get("mem_pct"), "gpu": gpu.get("util"),
+              "gpu_temp": gpu.get("temp"), "battery": battery.get("pct")}
+    names = {"cpu": ("处理器", "CPU"), "mem": ("内存", "RAM"), "gpu": ("显卡", "GPU"),
+             "gpu_temp": ("显卡温度", "温度"), "battery": ("电池", "电池"),
+             "down": ("下载", "下载"), "up": ("上传", "上传"),
+             "total_down": ("累计下载", "已收"), "total_up": ("累计上传", "已发"),
+             "uptime": ("运行时长", "运行")}
+    result = []
+    for key in STRIP_PROFILES.get(profile, STRIP_PROFILES["balanced"])[1]:
+        raw = values.get(key) if key in values else state.get(key)
+        raw = float(raw) if isinstance(raw, (int, float)) and math.isfinite(raw) else None
+        value, unit, level = "—", "", None
+        if key in values:
+            unit = "°C" if key == "gpu_temp" else "%"
+            if raw is not None:
+                value = f"{clamp(raw, 0, 150 if key == 'gpu_temp' else 100):.0f}"
+                level = clamp(raw / 110 * 100 if key == "gpu_temp" else raw, 0, 100)
+        elif raw is not None:
+            if key in ("up", "down"):
+                parts = fmt_speed(raw).split(" ")
+                value, unit = parts[0], parts[1]
+            elif key.startswith("total_"):
+                value, unit = fmt_bytes(raw).split(" ")
+            else:
+                hours, minutes = divmod(max(0, int(raw)) // 60, 60)
+                value = f"{hours // 24}d {hours % 24}h" if hours >= 24 else f"{hours}h {minutes}m"
+        result.append(dict(key=key, label=names[key][0], tag=names[key][1], value=value,
+                           unit=unit if raw is not None else "", level=level, raw=raw))
+    return result
 
 
 def mix_color(a, b, amount):
@@ -1297,6 +1350,7 @@ class LayeredStrip:
         self._hinst = None
         self.x = self.y = 0
         self.w = self.h = 0
+        self._hovered = False
 
     # ---------------- 创建
     def create(self, x, y, w, h):
@@ -1313,6 +1367,19 @@ class LayeredStrip:
             try:
                 if msg == self.WM_NCHITTEST:
                     return self.HTCLIENT
+                if msg == 0x0200 and not self._hovered:  # WM_MOUSEMOVE
+                    self._hovered = True
+                    self.app.ui_call("strip_enter")
+                    class TRACKMOUSEEVENT(ctypes.Structure):
+                        _fields_ = [("cbSize", wt.DWORD), ("dwFlags", wt.DWORD),
+                                    ("hwndTrack", wt.HWND), ("dwHoverTime", wt.DWORD)]
+                    tracking = TRACKMOUSEEVENT(ctypes.sizeof(TRACKMOUSEEVENT), 2, hwnd, 0)
+                    _u32.TrackMouseEvent(ctypes.byref(tracking))
+                    return 0
+                if msg == 0x02A3:  # WM_MOUSELEAVE
+                    self._hovered = False
+                    self.app.ui_call("strip_leave")
+                    return 0
                 if msg == self.WM_PAINT:
                     _u32.ValidateRect(hwnd, None)
                     return 0
@@ -1356,7 +1423,7 @@ class LayeredStrip:
         wc.lpfnWndProc = self._proc
         wc.hInstance = self._hinst
         wc.lpszClassName = self.title
-        wc.hCursor = u.LoadCursorW(None, ctypes.c_void_p(32512))   # IDC_ARROW
+        wc.hCursor = u.LoadCursorW(None, ctypes.c_void_p(32649))   # IDC_HAND
         atom = u.RegisterClassW(ctypes.byref(wc))
         if os.environ.get("DM_DEBUG"):
             print(f"[strip] cls={self.title} atom={atom} hinst={self._hinst}", file=sys.stderr)
@@ -1428,6 +1495,186 @@ class LayeredStrip:
         except Exception:
             pass
         self.hwnd = None
+
+class StripPainter:
+    """Render every taskbar style/layout with one shared measurement and spacing system."""
+
+    def __init__(self, app, width, height, **options):
+        self.app, self.width, self.height = app, width, height
+        self.options = {key: options.get(key, getattr(app, key, app.cfg.get(key, default)))
+                        for key, default in STRIP_DEFAULTS.items()}
+        self.style = self.options["style"]
+        self.layout = self.options["strip_layout"]
+        self.dw = STRIP_LAYOUTS[self.layout][1]
+        self.scale = min(width / self.dw, height / 46)
+        self.k = self.scale * 3
+        self.ox, self.oy = (width - self.dw * self.scale) / 2, (height - 44 * self.scale) / 2
+        self.image = Image.new("RGBA", (width * 3, height * 3), (0, 0, 0, 0))
+        self.d = ImageDraw.Draw(self.image)
+        self.font_factor = 1.1 if self.options["strip_size"] == "large" else 1.0
+        self.p = app.palette()
+        self.light = self.p["light"]
+        self.hover = options.get("hover", getattr(app, "_strip_hover", False))
+        self.metrics = strip_metrics(app.state, self.options["strip_profile"])
+        variants = {
+            "mint": ("teal", "blue", "violet", "amber"), "blue": ("blue", "teal", "violet", "amber"),
+            "violet": ("violet", "blue", "teal", "amber"), "amber": ("amber", "violet", "blue", "teal"),
+            "mono": ("ink",) * 4,
+        }
+        self.colors = [self.p[key] for key in variants[self.options["strip_accent"]]]
+
+    def point(self, x, y):
+        return round(self.ox * 3 + x * self.k), round(self.oy * 3 + y * self.k)
+
+    def rect(self, box, fill, radius=8, outline=None, stroke=0.7):
+        self.d.rounded_rectangle((*self.point(*box[:2]), *self.point(*box[2:])),
+            radius=round(radius * self.k), fill=fill, outline=outline, width=max(1, round(stroke * self.k)))
+
+    def line(self, points, color, width=1):
+        self.d.line([self.point(*point) for point in points], fill=color,
+                    width=max(1, round(width * self.k)), joint="curve")
+
+    def font(self, text, size, bold=False):
+        name = ("seguisb.ttf" if bold else "segoeui.ttf") if text.isascii() else ("msyhbd.ttc" if bold else "msyh.ttc")
+        return self.app._font(name, max(7, round(size * self.k * self.font_factor)))
+
+    def text(self, x, y, text, size, color, anchor="lm", bold=False):
+        self.d.text(self.point(x, y), text, font=self.font(text, size, bold), fill=color, anchor=anchor)
+
+    def value(self, x, y, metric, size, max_width, color, anchor="rm"):
+        value, unit = metric["value"], metric["unit"]
+        while True:
+            fv, fu = self.font(value, size, True), self.font(unit, max(6.5, size * 0.65))
+            total = fv.getlength(value) / self.k + (fu.getlength(unit) / self.k + 2 if unit else 0)
+            if total <= max_width or size <= 7.5:
+                break
+            size -= 0.5
+        left = x - total if anchor == "rm" else (x - total / 2 if anchor == "mm" else x)
+        self.text(left, y, value, size, color, bold=True)
+        if unit:
+            self.text(left + fv.getlength(value) / self.k + 2, y + 1, unit,
+                      max(6.5, size * 0.65), (*self.p["dim"], 255))
+
+    def color(self, index):
+        metric = self.metrics[index]
+        if metric["raw"] is None:
+            return self.p["faint"]
+        if metric["key"] in ("cpu", "mem", "gpu_temp") and (metric["level"] or 0) >= 88:
+            return self.p["red"]
+        if metric["key"] == "battery" and metric["raw"] <= 20:
+            return self.p["amber"]
+        return self.colors[index]
+
+    def history(self, metric):
+        return (self.app.hist.get(metric["key"]) or [])[-self.app.SPARK_N:]
+
+    def chart(self, box, metric, color, filled=False):
+        history = self.history(metric)
+        if not history:
+            return
+        x0, y0, x1, y1 = box
+        maximum = 100 if metric["key"] in ("cpu", "mem", "gpu", "battery") else (110 if metric["key"] == "gpu_temp" else max(max(history) * 1.1, 1))
+        step = (x1 - x0) / (self.app.SPARK_N - 1)
+        start = x1 - (len(history) - 1) * step
+        points = [(start + i * step, y1 - clamp(v / maximum, 0, 1) * (y1 - y0)) for i, v in enumerate(history)]
+        if len(points) < 2:
+            return
+        if filled:
+            self.d.polygon([self.point(*p) for p in [(start, y1)] + points + [(x1, y1)]], fill=(*color, 20))
+        self.line(points, (*color, 235), 1.2)
+
+    def indicator(self, box, metric, color):
+        level = metric["level"]
+        if level is None and metric["key"] in ("up", "down") and metric["raw"] is not None:
+            level = metric["raw"] / max(max(self.history(metric) or [0]), 1024) * 100
+        if level is None:
+            return
+        x0, y0, x1, y1 = box
+        if self.style == "ribbon":
+            y1 = y0 + 2.4
+            box = (x0, y0, x1, y1)
+        self.rect(box, (*color, 25), 1)
+        if level > 0:
+            self.rect((x0, y0, x0 + max(1.3, (x1 - x0) * clamp(level / 100, 0, 1)), y1), (*color, 205), 1)
+
+    def background(self):
+        accent = self.colors[0]
+        ink = self.p["ink"]
+        if self.style == "minimal":
+            return
+        if self.style == "tiles":
+            count = 2 if self.layout == "duo" else 4
+            gap, pad = 5, 2
+            width = (self.dw - 2 * pad - gap * (count - 1)) / count
+            for i in range(count):
+                x = pad + i * (width + gap)
+                self.rect((x, 2, x + width, 42), (*self.p["surface"], 240 if self.hover else 219), 9,
+                          (*self.colors[i], 90 if self.hover else 35))
+            return
+        fill = (*self.p["surface"], 160 if self.style == "glass" else 230)
+        border = (*ink, 30)
+        if self.style == "outline":
+            fill, border = (*accent, 10), (*accent, 125 if self.hover else 85)
+        elif self.style == "neon":
+            self.rect((0.5, 0.5, self.dw - 0.5, 43.5), (*accent, 20), 11)
+            fill, border = (*self.p["surface"], 232), (*accent, 180)
+        elif self.style == "ribbon":
+            fill, border = (*self.p["surface"], 242), (*ink, 20)
+        if self.hover:
+            border = (*accent, 160)
+        self.rect((2, 2, self.dw - 2, 42), fill, 9, border)
+        if self.style == "glass":
+            self.line([(13, 3), (self.dw - 13, 3)], (255, 255, 255, 100 if self.light else 38), 0.6)
+
+    def render(self):
+        self.background()
+        ink, dim = (*self.p["ink"], 255), (*self.p["dim"], 255)
+        indicators = (self.app.cfg.get("strip_indicators", True) and self.style not in ("minimal", "glass")) or self.style == "ribbon"
+        if self.layout == "duo":
+            width = (self.dw - 9) / 2
+            for i, metric in enumerate(self.metrics):
+                group, row = divmod(i, 2)
+                x, y = 2 + group * (width + 5), 13 + row * 18
+                color = self.color(i)
+                self.rect((x + 9, y - 2, x + 12, y + 2), (*color, 255), 1.5)
+                self.text(x + 17, y, metric["tag"], 7.3, dim)
+                self.value(x + width - 9, y, metric, 11.5, width - 52, ink)
+                if indicators:
+                    self.indicator((x + 9, y + 7, x + width - 9, y + 8.2), metric, color)
+        else:
+            cell = (self.dw - 4) / 4
+            for i, metric in enumerate(self.metrics):
+                x, color = 2 + i * cell, self.color(i)
+                center = x + cell / 2
+                if i and self.style != "tiles":
+                    self.line([(x, 11), (x, 33)], (*self.p["ink"], 21), 0.6)
+                if self.layout == "inline":
+                    self.text(center, 12, metric["label"], 7.2, (*color, 255), "mm")
+                    self.value(center, 27, metric, 14, cell - 15, ink, "mm")
+                    if indicators:
+                        self.indicator((x + 10, 38, x + cell - 10, 39.2), metric, color)
+                elif self.layout == "gauges":
+                    if metric["level"] is not None:
+                        box = (*self.point(center - 11, 5), *self.point(center + 11, 27))
+                        self.d.arc(box, 0, 360, fill=(*color, 35), width=max(1, round(2.3 * self.k)))
+                        if metric["level"] > 0:
+                            self.d.arc(box, -90, -90 + 3.6 * metric["level"], fill=(*color, 255), width=max(1, round(2.3 * self.k)))
+                        self.text(center, 16, metric["value"], 9, ink, "mm", True)
+                    else:
+                        self.chart((x + 12, 5, x + cell - 12, 12), metric, color)
+                        self.value(center, 22, metric, 12.5, cell - 14, ink, "mm")
+                    caption = metric["tag"] + (" " + metric["unit"] if metric["level"] is not None else "")
+                    self.text(center, 36, caption, 7.2, (*color, 255), "mm")
+                else:
+                    self.text(x + 8, 12, metric["tag"], 7, dim)
+                    self.value(x + cell - 8, 12, metric, 10.5, cell - 35, ink)
+                    self.line([(x + 8, 37), (x + cell - 8, 37)], (*color, 25), 0.7)
+                    self.chart((x + 8, 24, x + cell - 8, 37), metric, color, True)
+        out = self.image.resize((self.width, self.height), Image.Resampling.LANCZOS)
+        opacity = float(self.app.cfg.get("alpha", 1.0))
+        out.putalpha(out.getchannel("A").point(lambda value: max(1, round(value * opacity))))
+        return out
+
 
 class Surface:
     """Shared, DPI-aware drawing primitives for all Pillow-rendered surfaces."""
@@ -1504,7 +1751,7 @@ class Surface:
 class MonitorApp:
     W, H = 420, 548          # 完整模式（96dpi 设计尺寸）
     CW, CH = 260, 100         # 紧凑模式
-    STRIP_H = 34             # 任务栏条高度
+    STRIP_H = 48             # 任务栏条高度
     PAD = 14
     SPARK_N = 56
 
@@ -1543,7 +1790,7 @@ class MonitorApp:
         self.scale = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
         # taskbar = 贴在任务栏上沿的小横条（默认） / card = 悬浮卡片 / mini = 浮动紧凑条
         self.mode = self.cfg.get("mode") or ("mini" if self.cfg.get("compact") else "taskbar")
-        if self.mode not in ("taskbar", "card", "mini"):
+        if self.mode not in ("taskbar", "card", "mini", "tray"):
             self.mode = "taskbar"
         self.layer = self.cfg.get("layer", "top")      # top / normal / bottom
         self.interval = int(self.cfg.get("interval", 1000))
@@ -1566,7 +1813,8 @@ class MonitorApp:
         self._popup_win = False
         self._mouse_down = False
         self.card_theme = self.cfg.get("card_theme", "dark")
-        self.style = self.cfg.get("style", "pill")
+        self.style = self.cfg["style"]
+        self._strip_hover = False
         self.theme = self.cfg.get("theme", "auto")
         self._font_cache = {}
         self._tb_rect = None
@@ -1585,7 +1833,7 @@ class MonitorApp:
 
         self._pick_fonts()
         self._build_strip()
-        self.hist = {"cpu": [], "gpu": [], "down": [], "up": [], "mem": []}
+        self.hist = {key: [] for key in ("cpu", "gpu", "down", "up", "mem", "gpu_temp", "total_down", "total_up", "battery", "uptime")}
         self.state = {}
         self.clock = ""
 
@@ -1698,6 +1946,9 @@ class MonitorApp:
                         self.toggle_detail()
                     elif name == "menu":
                         self.open_menu_at_cursor()
+                    elif name in ("strip_enter", "strip_leave"):
+                        self._strip_hover = name == "strip_enter"
+                        self.draw_strip()
                     elif name == "readd_icon":
                         if getattr(self, "tray", None):
                             self.tray._add_icon()
@@ -1752,9 +2003,14 @@ class MonitorApp:
                     break
             except (OSError, ValueError):
                 pass
+        old_style = data.get("style")
+        if isinstance(old_style, str):
+            data["style"] = {"text": "minimal", "pill": "glass"}.get(old_style, old_style)
+        for key, choices in STRIP_CHOICES.items():
+            if not isinstance(data.get(key), str) or data[key] not in choices:
+                data[key] = STRIP_DEFAULTS[key]
         for key, choices, default in (
             ("mode", ("taskbar", "card", "mini", "tray"), "taskbar"),
-            ("style", ("text", "pill", "outline"), "pill"),
             ("theme", ("auto", "dark", "light"), "auto"),
             ("card_theme", tuple(CARD_THEMES), "dark"),
             ("layer", ("top", "normal", "bottom"), "top"),
@@ -1771,7 +2027,7 @@ class MonitorApp:
         for key in ("x", "y"):
             value = data.get(key)
             data[key] = int(value) if isinstance(value, (int, float)) and math.isfinite(value) and abs(value) < 100000 else None
-        for key, default in (("locked", False), ("hide_fullscreen", True)):
+        for key, default in (("locked", False), ("hide_fullscreen", True), ("strip_indicators", True)):
             data[key] = data.get(key) if isinstance(data.get(key), bool) else default
         return data
 
@@ -2157,11 +2413,35 @@ class MonitorApp:
         self.save_cfg()
 
     def set_style(self, name):
-        self.style = name
-        self.cfg["style"] = name
+        self.set_strip_option("style", name)
+
+    def set_strip_option(self, key, value):
+        if key not in STRIP_CHOICES or value not in STRIP_CHOICES[key]:
+            return
+        self.cfg[key] = value
+        if key == "style":
+            self.style = value
+        self._build_strip()
+        if self.mode == "taskbar":
+            self.dock_now(force=True)
         self.save_cfg()
-        self._strip_key = None
-        self.draw()
+        if self._set_win is not None:
+            self.render_settings()
+
+    def refresh_settings_preview(self):
+        label = getattr(self, "_settings_preview_label", None)
+        if label is None or not label.winfo_exists():
+            return
+        p = CARD_THEMES[self.card_theme]
+        scale = min(self.scale, self.work_area()[2] / 720)
+        width = min(round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * scale * STRIP_SIZES[self.cfg["strip_size"]][1]), round(540 * scale))
+        height = round(54 * scale)
+        bg = (235, 240, 248, 255) if self.palette()["light"] else (16, 23, 35, 255)
+        composite = Image.new("RGBA", (width + round(28 * scale), height + round(10 * scale)), bg)
+        image = self._compose_strip(width, height)
+        composite.alpha_composite(image, (round(14 * scale), round(5 * scale)))
+        self._settings_preview = ImageTk.PhotoImage(composite.convert("RGB"), master=self.root)
+        label.configure(image=self._settings_preview, bg=p["surface"])
 
     def set_card_theme(self, name):
         if name not in CARD_THEMES:
@@ -2184,11 +2464,14 @@ class MonitorApp:
                 win.wm_attributes("-alpha", alpha)
 
     def set_theme(self, name):
+        if name not in ("auto", "dark", "light"):
+            return
         self.theme = name
         self.cfg["theme"] = name
         self.save_cfg()
-        self._strip_key = None
         self.draw()
+        if self._set_win is not None:
+            self.render_settings()
 
     def toggle_compact(self):
         self.set_mode("mini" if self.mode != "mini" else "card")
@@ -2204,45 +2487,50 @@ class MonitorApp:
         mode_name = {"taskbar": "任务栏条", "card": "悬浮卡片", "mini": "紧凑条", "tray": "仅托盘"}[self.mode]
         return [
             ("head", "桌面性能监视器", f"v{APP_VERSION}", None, 42),
-            ("item", "收起详情" if self.popup else "查看性能详情", "↗", self.toggle_detail, 38),
-            ("item", "偏好设置", "", self.open_settings, 38),
-            ("gap", "", "", None, 12),
-            ("item", "显示模式", mode_name, lambda: self.cycle("mode"), 38),
+            ("item", "收起详情" if self.popup else "查看性能详情", "↗", self.toggle_detail, 36),
+            ("item", "样式与布局", "设置", lambda: self.open_settings("appearance"), 36),
+            ("gap", "", "", None, 10),
+            ("item", "任务栏样式", STRIP_STYLES[self.style], lambda: self.cycle("style"), 36),
+            ("item", "展示排版", STRIP_LAYOUTS[self.cfg["strip_layout"]][0], lambda: self.cycle("strip_layout"), 36),
+            ("item", "展示指标", STRIP_PROFILES[self.cfg["strip_profile"]][0], lambda: self.cycle("strip_profile"), 36),
+            ("item", "显示模式", mode_name, lambda: self.cycle("mode"), 36),
             ("item", "面板主题", {"dark": "深空", "light": "云白", "minimal": "素纸", "glass": "雾蓝"}[self.card_theme],
-             lambda: self.cycle("card_theme"), 38),
-            ("item", "锁定位置", "已锁定" if self.locked else "可拖动", self.toggle_lock, 38),
-            ("item", "重置位置", "", self.reset_position, 38),
-            ("gap", "", "", None, 12),
-            ("item", "打开任务管理器", "↗", lambda: subprocess.Popen(["taskmgr.exe"], creationflags=CREATE_NO_WINDOW), 38),
-            ("item", "关于与传感器说明", "", self.show_about, 38),
-            ("gap", "", "", None, 12),
-            ("item", "退出监视器", "Ctrl+Q", self.quit, 38),
+             lambda: self.cycle("card_theme"), 36),
+            ("gap", "", "", None, 10),
+            ("item", "锁定位置", "已锁定" if self.locked else "可拖动", self.toggle_lock, 36),
+            ("item", "重置位置", "", self.reset_position, 36),
+            ("item", "打开任务管理器", "↗", lambda: subprocess.Popen(["taskmgr.exe"], creationflags=CREATE_NO_WINDOW), 36),
+            ("item", "关于与传感器说明", "", self.show_about, 36),
+            ("gap", "", "", None, 10),
+            ("item", "退出监视器", "Ctrl+Q", self.quit, 36),
         ]
 
     def cycle(self, key):
-        if key == "mode":
+        if key in STRIP_CHOICES:
+            order = list(STRIP_CHOICES[key])
+            current = self.cfg[key]
+            self.set_strip_option(key, order[(order.index(current) + 1) % len(order)])
+        elif key == "mode":
             order = ["taskbar", "card", "mini", "tray"]
             self.set_mode(order[(order.index(self.mode) + 1) % len(order)])
-        elif key == "style":
-            order = ["text", "pill", "outline"]
-            self.set_style(order[(order.index(self.style) + 1) % len(order)] if self.style in order else "text")
         elif key == "theme":
             order = ["auto", "dark", "light"]
-            self.set_theme(order[(order.index(self.theme) + 1) % len(order)] if self.theme in order else "auto")
+            self.set_theme(order[(order.index(self.theme) + 1) % len(order)])
         elif key == "card_theme":
-            order = ["dark", "light", "minimal", "glass"]
-            self.set_card_theme(order[(order.index(self.card_theme) + 1) % len(order)] if self.card_theme in order else "dark")
+            order = list(CARD_THEMES)
+            self.set_card_theme(order[(order.index(self.card_theme) + 1) % len(order)])
         elif key == "interval":
             order = [500, 1000, 2000, 5000]
-            self.set_interval(order[(order.index(self.interval) + 1) % len(order)] if self.interval in order else 1000)
+            index = order.index(self.interval) if self.interval in order else 0
+            self.set_interval(order[(index + 1) % len(order)])
         elif key == "alpha":
             order = [1.0, 0.95, 0.9, 0.8]
-            cur = float(self.cfg.get("alpha", 1.0))
-            idx = order.index(cur) if cur in order else 0
-            self.set_alpha(order[(idx + 1) % len(order)])
+            current = float(self.cfg.get("alpha", 1.0))
+            index = order.index(current) if current in order else 0
+            self.set_alpha(order[(index + 1) % len(order)])
         elif key == "layer":
             order = ["top", "normal", "bottom"]
-            self.set_layer(order[(order.index(self.layer) + 1) % len(order)] if self.layer in order else "top")
+            self.set_layer(order[(order.index(self.layer) + 1) % len(order)])
 
     def show_menu(self, x=None, y=None):
         if self._menu_win is not None:
@@ -2397,8 +2685,8 @@ class MonitorApp:
         win.bind("<Escape>", lambda e: self._close_settings())
         win.bind("<Control-q>", lambda e: self.quit())
         ax, ay, aw, ah = self.work_area()
-        scale = min(self.scale, (aw - 40) / 600)
-        w, h = round(600 * scale), min(round(704 * scale), ah - 70)
+        scale = min(self.scale, (aw - 40) / 680)
+        w, h = round(680 * scale), min(round(820 * scale), ah - 70)
         self.place_window(win, w, h, ax + (aw - w) // 2, ay + (ah - h) // 2)
         win.minsize(min(w, round(440 * scale)), min(h, round(400 * scale)))
         self.render_settings()
@@ -2410,6 +2698,11 @@ class MonitorApp:
         win = self._set_win
         if win is None:
             return
+        old_canvas = getattr(self, "_settings_canvas", None)
+        same_tab = getattr(self, "_settings_rendered_tab", None) == self._settings_tab
+        scroll = old_canvas.yview()[0] if same_tab and old_canvas is not None and old_canvas.winfo_exists() else 0
+        self._settings_rendered_tab = self._settings_tab
+        self._settings_preview_label = None
         for widget in win.winfo_children():
             widget.destroy()
         self._settings_vars = []
@@ -2423,7 +2716,7 @@ class MonitorApp:
             dwm.DwmSetWindowAttribute(int(win.wm_frame(), 16), 20, ctypes.byref(value), ctypes.sizeof(value))
         except (OSError, AttributeError):
             pass
-        scale = min(self.scale, self.work_area()[2] / 640)
+        scale = min(self.scale, self.work_area()[2] / 720)
         px = lambda n: max(1, round(n * scale))
         font = lambda n, bold=False: (self.f_cn, -px(n), "bold" if bold else "normal")
         header = tk.Frame(win, bg=p["bg"], padx=px(26), pady=px(20))
@@ -2449,9 +2742,20 @@ class MonitorApp:
             self._settings_tab = key
             self.render_settings()
 
-        for i, (key, label) in enumerate((("appearance", "外观"), ("behavior", "行为"), ("about", "关于"))):
+        for i, (key, label) in enumerate((("appearance", "任务栏"), ("panel", "面板"), ("behavior", "行为"), ("about", "关于"))):
             navigation.columnconfigure(i, weight=1, uniform="tabs")
             button(navigation, label, lambda k=key: switch_tab(k), self._settings_tab == key).grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else px(6), 0))
+
+        if self._settings_tab == "appearance":
+            live = tk.Frame(win, bg=p["surface"], padx=px(16), pady=px(10))
+            live.pack(fill="x", padx=px(26), pady=(0, px(14)))
+            top = tk.Frame(live, bg=p["surface"])
+            top.pack(fill="x")
+            tk.Label(top, text="任务栏实时预览", bg=p["surface"], fg=p["dim"], font=font(10, True)).pack(side="left")
+            tk.Label(top, text="点击下方样式即可应用", bg=p["surface"], fg=p["faint"], font=font(9)).pack(side="right")
+            self._settings_preview_label = tk.Label(live, bg=p["surface"], bd=0)
+            self._settings_preview_label.pack(anchor="center", pady=(px(6), 0))
+            self.refresh_settings_preview()
 
         footer = tk.Frame(win, bg=p["bg"], padx=px(26), pady=px(14))
         footer.pack(side="bottom", fill="x")
@@ -2461,6 +2765,7 @@ class MonitorApp:
         viewport = tk.Frame(win, bg=p["bg"])
         viewport.pack(fill="both", expand=True)
         canvas = tk.Canvas(viewport, highlightthickness=0, bd=0, bg=p["bg"])
+        self._settings_canvas = canvas
         style = ttk.Style(win)
         style.theme_use("clam")
         style.layout("Monitor.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {
@@ -2541,19 +2846,45 @@ class MonitorApp:
                 highlightthickness=0, cursor="hand2", anchor="w").pack(anchor="w", pady=(px(7), 0))
 
         if self._settings_tab == "appearance":
-            preview = section("任务栏预览", "点击信息条可随时查看性能详情。")
-            sample_h = round(46 * scale)
-            self._settings_preview = ImageTk.PhotoImage(self._compose_strip(self.strip_w, sample_h), master=self.root)
-            tk.Label(preview, image=self._settings_preview, bg=p["surface"]).pack(anchor="w", pady=(px(8), 0))
-            def update_preview(command, value):
-                command(value)
-                self.render_settings()
+            frame = section("选择任务栏样式", "外观与排版可自由组合，所有样式都支持深浅任务栏。")
+            grid = tk.Frame(frame, bg=p["surface"])
+            grid.pack(fill="x", pady=(px(8), 0))
+            self._style_photos = []
+            for index, (key, name) in enumerate(STRIP_STYLES.items()):
+                thumb_w, thumb_h = px(146), px(39)
+                thumb = self._compose_strip(thumb_w, thumb_h, style=key, hover=False)
+                background = (235, 240, 248, 255) if self.palette()["light"] else (16, 23, 35, 255)
+                sample = Image.new("RGBA", thumb.size, background)
+                sample.alpha_composite(thumb)
+                photo = ImageTk.PhotoImage(sample.convert("RGB"), master=self.root)
+                self._style_photos.append(photo)
+                control = button(grid, name + ("  ✓" if self.style == key else ""),
+                                 lambda value=key: self.set_style(value), self.style == key)
+                control.configure(image=photo, compound="top", padx=px(7), pady=px(8))
+                grid.columnconfigure(index % 3, weight=1, uniform="styles")
+                control.grid(row=index // 3, column=index % 3, sticky="ew", padx=px(3), pady=px(3))
+            segments("展示排版", [(key, item[0]) for key, item in STRIP_LAYOUTS.items()], self.cfg["strip_layout"],
+                     lambda value: self.set_strip_option("strip_layout", value))
+            segments("展示指标", [(key, item[0]) for key, item in STRIP_PROFILES.items()], self.cfg["strip_profile"],
+                     lambda value: self.set_strip_option("strip_profile", value),
+                     "均衡：CPU / 内存 / 上下行 · 硬件：CPU / 内存 / GPU / 温度\n网络：速度与累计流量 · 续航：CPU / 内存 / 电池 / 运行时长")
+            segments("强调色", list(STRIP_ACCENTS.items()), self.cfg["strip_accent"],
+                     lambda value: self.set_strip_option("strip_accent", value))
+            segments("显示尺寸", [(key, item[0]) for key, item in STRIP_SIZES.items()], self.cfg["strip_size"],
+                     lambda value: self.set_strip_option("strip_size", value))
+            segments("任务栏字色", [("auto", "自动适配"), ("dark", "深色文字"), ("light", "浅色文字")], self.theme, self.set_theme)
+            def indicators(value):
+                self.cfg["strip_indicators"] = value
+                self.save_cfg()
+                self.draw()
+                self.refresh_settings_preview()
+            toggle("负载刻度", "在双行和横排底部显示占用刻度，让变化一眼可见。", self.cfg["strip_indicators"], indicators)
+        elif self._settings_tab == "panel":
             segments("显示模式", [("taskbar", "任务栏条"), ("card", "悬浮卡片"), ("mini", "紧凑条"), ("tray", "仅托盘")], self.mode, self.set_mode)
-            segments("任务栏样式", [("text", "素净"), ("pill", "胶囊"), ("outline", "描边")], self.style, lambda v: update_preview(self.set_style, v))
-            segments("任务栏字色", [("auto", "跟随任务栏"), ("dark", "深色文字"), ("light", "浅色文字")], self.theme, lambda v: update_preview(self.set_theme, v))
-            segments("面板主题", [("dark", "深空"), ("light", "云白"), ("minimal", "素纸"), ("glass", "雾蓝")], self.card_theme, self.set_card_theme, "详情、紧凑条、菜单与设置同步使用此主题。")
+            segments("面板主题", [("dark", "深空"), ("light", "云白"), ("minimal", "素纸"), ("glass", "雾蓝")], self.card_theme, self.set_card_theme,
+                     "详情、紧凑条、菜单与设置同步使用此主题。")
             slider("不透明度", "调整监视器的通透程度，设置窗口保持清晰。", 30, 100, 5,
-                   round(self.cfg["alpha"] * 100), lambda v: self.set_alpha(v / 100), lambda v: f"{v:.0f}%")
+                   round(self.cfg["alpha"] * 100), lambda value: self.set_alpha(value / 100), lambda value: f"{value:.0f}%")
         elif self._settings_tab == "behavior":
             slider("刷新间隔", "进程约每 3 秒采样一次；温度由传感器更新。", 0.5, 5.0, 0.5,
                    self.interval / 1000, lambda v: self.set_interval(round(v * 1000)), lambda v: f"{v:g} 秒")
@@ -2594,6 +2925,13 @@ class MonitorApp:
             section("快捷操作", "左键点击任务栏条或托盘图标查看详情。右键打开菜单。\n悬浮模式可拖动，双击切换卡片与紧凑条。\nEsc 关闭弹出窗口，Ctrl+Q 退出监视器。")
             section("传感器与数据", "CPU、内存、磁盘和网速来自 Windows。网络汇总活动物理网卡。\nGPU 读取首块 NVIDIA 显卡的 nvidia-smi，其他显卡显示未提供。\nCPU 温度优先读取 LibreHardwareMonitor / OpenHardwareMonitor；ACPI 热区仅作参考，可能不代表 CPU 核心。\n进程按 CPU 占用排序并合并同名进程，内存为工作集；TCP 列是非监听连接数，不是进程网速。")
             section("本地运行", "监控数据在本机处理，不上传。温度或显卡数据不可用时显示占位，不影响其他指标。")
+
+        def restore_scroll():
+            if canvas.winfo_exists() and self._settings_canvas is canvas:
+                canvas.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.yview_moveto(scroll)
+        self.root.after(20, restore_scroll)
 
     def _close_settings(self):
         try:
@@ -2741,6 +3079,7 @@ class MonitorApp:
             log_exc(*sys.exc_info())
         self.push_history()
         self.clock = time.strftime("%H:%M:%S")
+        self.refresh_settings_preview()
         if self._scale_tick % 3 == 0:
             self.refresh_bg()
             self.update_tray_tip()
@@ -2756,6 +3095,11 @@ class MonitorApp:
             ("mem", st.get("mem_pct")),
             ("down", st.get("down")),
             ("up", st.get("up")),
+            ("gpu_temp", (st.get("gpu") or {}).get("temp")),
+            ("total_down", st.get("total_down")),
+            ("total_up", st.get("total_up")),
+            ("battery", (st.get("battery") or {}).get("pct")),
+            ("uptime", st.get("uptime")),
         ):
             h = self.hist[key]
             h.append(float(val) if val is not None else 0.0)
@@ -2819,40 +3163,21 @@ class MonitorApp:
         return f
 
     def _build_strip(self):
-        s = self.scale
-        self._px_lab = max(8, int(round(8.6 * s)))
-        self._px_val = max(10, int(round(12.8 * s)))
-        lab = self._font("segoeui.ttf", self._px_lab)
-        val = self._font("seguisb.ttf", self._px_val)
-
-        self._w_lab = max(lab.getlength("CPU"), lab.getlength("RAM"))
-        self._w_num = val.getlength("100")
-        self._w_pct = lab.getlength("%")
-        self._g1, self._g2, self._g3 = self.s(5), self.s(3), self.s(4)
-        col1 = self._w_lab + self._g1 + self._w_num + self._g2 + self._w_pct
-        self._w_netv = max(val.getlength("999.9M"), val.getlength("999 B"), val.getlength("99.99G"))
-        self._w_arrow = val.getbbox("↓")[2]          # 箭头真实的墨迹右边界
-        col2 = self._w_arrow + self._g3 + self._w_netv
-        gap, pad = self.s(15), self.s(10)
-        self.strip_cols = [("left", pad, col1), ("net", pad + col1 + gap, col2)]
-        self.strip_w = int(round(pad + col1 + gap + col2 + pad))
+        density = STRIP_SIZES[self.cfg["strip_size"]][1]
+        self.strip_w = round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * self.scale * density)
         self._strip_key = None
         self._img_item = None
 
     # 任务栏取色 / 文字配色
     def palette(self):
-        light = self.tb_light
-        if self.theme == "dark":
-            light = True
-        elif self.theme == "light":
-            light = False
+        light = self.theme == "dark" or (self.theme == "auto" and self.tb_light)
         if light:
-            return dict(ink=(20, 22, 26), dim=(77, 83, 92), faint=(107, 114, 128),
-                        red=(196, 55, 44), amber=(154, 91, 0),
-                        teal=(13, 111, 99), blue=(36, 86, 201))
-        return dict(ink=(243, 245, 248), dim=(154, 162, 174), faint=(118, 126, 138),
-                    red=(255, 111, 99), amber=(240, 166, 60),
-                    teal=(63, 211, 189), blue=(110, 168, 255))
+            return dict(light=True, surface=(250, 252, 255), ink=(31, 44, 63), dim=(84, 103, 126),
+                        faint=(109, 124, 145), teal=(9, 129, 108), blue=(42, 107, 202),
+                        violet=(126, 81, 189), amber=(169, 110, 17), red=(194, 60, 78))
+        return dict(light=False, surface=(22, 32, 48), ink=(239, 246, 255), dim=(167, 187, 211),
+                    faint=(123, 145, 174), teal=(104, 226, 190), blue=(130, 181, 255),
+                    violet=(197, 170, 255), amber=(249, 201, 112), red=(255, 134, 147))
 
 
 
@@ -2893,117 +3218,18 @@ class MonitorApp:
         except Exception:
             pass
 
-    def _compose_strip(self, W, H):
-        from PIL import Image, ImageDraw
-        P = self.palette()
-        st = self.state
-        SS = 3
-
-        def S(v):
-            return v * SS
-
-        layer = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
-
-        style = getattr(self, "style", "pill")
-        if style in ("pill", "outline"):
-            ph = min(H * 0.86, 42 * self.scale)
-            py = (H - ph) / 2.0
-            if style == "pill":
-                k = 0.34 if self.tb_light else 0.14
-                fill = (255, 255, 255, int(255 * k))
-                edge = (255, 255, 255, int(255 * min(k + 0.25, 0.9)))
-            else:
-                fill = None
-                edge = (0, 0, 0, 46) if self.tb_light else (255, 255, 255, 52)
-            d.rounded_rectangle([S(3), S(py), S(W - 3), S(py + ph)],
-                                radius=S(9 * self.scale), fill=fill, outline=edge,
-                                width=max(1, SS))
-
-        lab = self._font("segoeui.ttf", self._px_lab * SS)
-        val = self._font("seguisb.ttf", self._px_val * SS)
-        cols = {k: (x, w) for k, x, w in self.strip_cols}
-        lx, lw = cols["left"]
-        nx, nw = cols["net"]
-        y1 = H * 0.335 * SS
-        y2 = H * 0.665 * SS
-
-        # 两列之间的极淡分隔线
-        sep = (0, 0, 0, 20) if self.tb_light else (255, 255, 255, 24)
-        dx = S((nx - self.s(7.5)))
-        d.line([(dx, S(H * 0.24)), (dx, S(H * 0.76))], fill=sep, width=SS)
-
-        # 数字右对齐到同一条竖线，% 固定位置 —— 两行严丝合缝
-        x_num_r = S(lx + self._w_lab + self._g1 + self._w_num)
-        x_pct = S(lx + self._w_lab + self._g1 + self._w_num + self._g2)
-        x_net_r = S(nx + nw)
-
-        def row(y, label, value, color):
-            d.text((S(lx), y), label, font=lab, fill=P["dim"], anchor="lm")
-            d.text((x_num_r, y), "--" if value is None else f"{value:.0f}",
-                   font=val, fill=color, anchor="rm")
-            d.text((x_pct, y), "%", font=lab, fill=P["faint"], anchor="lm")
-
-        cpu = st.get("cpu")
-        mem = st.get("mem_pct")
-        row(y1, "CPU", cpu, P["ink"])
-        row(y2, "RAM", mem,
-            P["red"] if (mem or 0) >= 90 else (P["amber"] if (mem or 0) >= 75 else P["ink"]))
-
-        aw = val.getbbox("↓")[2]                          # 墨迹右边界，不是前进宽度
-        vx = S(nx) + aw + S(self.s(4.0))                     # 数值紧贴箭头墨迹
-        # 上行在上、下行在下
-        d.text((S(nx), y1), "↑", font=val, fill=P["blue"], anchor="lm")
-        d.text((vx, y1), fmt_speed(st.get("up"), short=True),
-               font=val, fill=P["ink"], anchor="lm")
-        d.text((S(nx), y2), "↓", font=val, fill=P["teal"], anchor="lm")
-        d.text((vx, y2), fmt_speed(st.get("down"), short=True),
-               font=val, fill=P["ink"], anchor="lm")
-
-        out = layer.resize((W, H), Image.LANCZOS)
-        # 分层窗口按 alpha 做命中测试：全透明的地方点不到，所以整体抬到 1/255（肉眼不可见）
-        out.putalpha(out.getchannel("A").point(lambda v: v if v > 1 else 1))
-        opacity = float(self.cfg.get("alpha", 1.0))
-        if opacity < 1:
-            out.putalpha(out.getchannel("A").point(lambda v: max(1, round(v * opacity))))
-        return out
+    def _compose_strip(self, W, H, **options):
+        return StripPainter(self, W, H, **options).render()
 
     def draw_strip(self):
-        if self.strip is not None and self._tb_rect:
-            try:
-                img = self._compose_strip(self._tb_rect[2], self._tb_rect[3])
-                x, y, w, h = self._tb_rect
-                self.strip.update(img, x, y)
-                self.strip.raise_top()
-                return
-            except Exception:
-                log_exc(*sys.exc_info())
-        st = self.state
-        sig = (round(st.get("cpu") or -1), round(st.get("mem_pct") or -1),
-               fmt_speed(st.get("down"), short=True), fmt_speed(st.get("up"), short=True),
-               self.tb_light)
-        if sig == getattr(self, "_last_sig", None) and self._img_item is not None:
-            return                      # 内容没变就不重画，减少 Tcl 图像churn
-        self._last_sig = sig
-        c = self.canvas
-        W = self.strip_w
-        H = self._tb_h or int(round(48 * self.scale))
-        if not HAVE_PIL:
+        if self.mode != "taskbar" or self._fs_hidden:
             return
-        try:
-            from PIL import ImageTk
-            self._photo = ImageTk.PhotoImage(self._compose_strip(W, H), master=self.root)
-        except Exception:
-            if os.environ.get("DM_DEBUG"):
-                import traceback
-                traceback.print_exc()
+        if self.strip is None or not self._tb_rect:
+            self.dock_now(force=True)
             return
-        if self._img_item is None or self._strip_key != (W, H, id(self._bg_pil)):
-            c.delete("all")
-            self._img_item = c.create_image(0, 0, image=self._photo, anchor="nw")
-            self._strip_key = (W, H, id(self._bg_pil))
-        else:
-            c.itemconfigure(self._img_item, image=self._photo)
+        x, y, w, h = self._tb_rect
+        self.strip.update(self._compose_strip(w, h), x, y)
+        self.strip.raise_top()
 
     def draw(self):
         if self.mode == "tray":
@@ -3202,7 +3428,10 @@ def main():
         threading.excepthook = lambda a: log_exc(a.exc_type, a.exc_value, a.exc_traceback)
     except Exception:
         pass
-    MonitorApp().root.mainloop()
+    app = MonitorApp()
+    if "--settings" in sys.argv:
+        app.root.after(350, app.open_settings)
+    app.root.mainloop()
 
 
 if __name__ == "__main__":

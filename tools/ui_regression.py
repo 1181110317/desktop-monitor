@@ -64,10 +64,35 @@ def main():
                 timers = app.root.tk.splitlist(app.root.tk.call("after", "info"))
                 assert len([t for t in timers if "_popup_watch" in str(app.root.tk.call("after", "info", t))]) == 1
                 app.hide_detail()
-            for tab in ("appearance", "behavior", "about"):
+            for tab in ("appearance", "panel", "behavior", "about"):
                 app.open_settings(tab)
                 pump()
                 assert app._set_win.winfo_exists()
+            app._close_settings()
+            # Layout changes must resize the native strip while preserving docking and preferences.
+            app.set_mode("taskbar")
+            for layout in mon.STRIP_LAYOUTS:
+                app.set_strip_option("strip_layout", layout)
+                for style in mon.STRIP_STYLES:
+                    app.set_style(style)
+                    if app.strip:
+                        assert app.strip.w == app.strip_w
+                    for profile in mon.STRIP_PROFILES:
+                        image = app._compose_strip(app.strip_w, round(48 * app.scale), strip_profile=profile)
+                        assert image.mode == "RGBA" and image.size[0] == app.strip_w
+            app.set_strip_option("strip_profile", "hardware")
+            app.set_strip_option("strip_accent", "violet")
+            app.set_strip_option("strip_size", "large")
+            saved = json.loads(Path(mon.CFG_PATH).read_text(encoding="utf-8"))
+            assert (saved["strip_profile"], saved["strip_accent"], saved["strip_size"]) == ("hardware", "violet", "large")
+            app.open_settings("appearance")
+            pump()
+            app._settings_canvas.yview_moveto(0.5)
+            pump()
+            previous_scroll = app._settings_canvas.yview()[0]
+            app.set_style("glass")
+            pump()
+            assert abs(app._settings_canvas.yview()[0] - previous_scroll) < 0.03, (previous_scroll, app._settings_canvas.yview())
             app._close_settings()
             app.set_card_theme("dark")
             app.set_mode("card")
