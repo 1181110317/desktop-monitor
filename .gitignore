@@ -2,6 +2,8 @@
 config.json
 error.log
 disabled.flag
+dm_click.log
+.venv/
 
 # Python
 __pycache__/

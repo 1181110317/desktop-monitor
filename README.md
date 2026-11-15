@@ -1,29 +1,66 @@
 # 桌面性能监视器
 
-Windows 任务栏上的实时性能条。
+一个轻量的 Windows 性能监视器，在任务栏或桌面随时查看电脑状态。Python + Pillow 绘制，Win32 原生采样，监控数据在本机处理。
 
 ## 功能
 
-- 嵌进任务栏：CPU / 内存 / 上传 / 下载，一秒刷新
-- 点击展开详情：GPU、温度、网速曲线、Top 进程、磁盘、电池
-- 三套样式（素净 / 胶囊 / 描边）+ 四套主题（深色 / 浅色 / 简约 / 玻璃）
-- 进程列表可展开到 8 行，设置里可调刷新间隔和不透明度
-- 全屏时自动隐藏；纯 Python + Pillow，无服务无联网
+- 四种显示方式：任务栏条、悬浮卡片、紧凑条、仅托盘。
+- CPU 与内存占用、GPU / 显存 / 温度、上下行网速与趋势、磁盘余量、电池及运行时长。
+- 进程按 CPU 排序、合并同名进程，支持展开到 8 行，查看 CPU、工作集内存和 TCP 连接数。
+- 三种任务栏样式，四套面板主题：深空、云白、素纸、雾蓝。
+- 外观 / 行为 / 关于设置页签，支持刷新间隔、透明度、层级、位置锁定、开机启动和全屏隐藏。
+- DPI 缩放、工作区边界适配；配置自动保存，重复启动不会叠加实例。
 
 ## 使用
 
-下载 [Releases](https://github.com/1181110317/desktop-monitor/releases/latest) 里的 `DesktopMonitor.exe`，放到纯英文路径下双击即可。
+已发布版本见 [Releases](https://github.com/1181110317/desktop-monitor/releases)。最新代码的可执行文件可从 [Windows 构建](https://github.com/1181110317/desktop-monitor/actions/workflows/windows.yml) 下载 `DesktopMonitor-Windows-x64` 产物。
 
-源码运行：
+解压后运行 `DesktopMonitor.exe`，无需安装 Python。升级前从托盘菜单退出旧版，再运行新版。
 
-```bash
-pip install pillow
+| 操作 | 效果 |
+| --- | --- |
+| 左键点击任务栏条 / 托盘图标 | 展开或收起详情 |
+| 右键点击信息条 / 面板 / 托盘 | 打开菜单 |
+| 详情右上角设置按钮 | 打开偏好设置 |
+| 悬浮模式下拖动 / 双击 | 移动 / 切换卡片与紧凑条 |
+| 详情中的展开按钮 | 3 行 / 8 行进程列表 |
+| Esc / Ctrl+Q | 关闭弹出窗口 / 退出监视器 |
+
+## 源码运行与打包
+
+Windows 10 / 11，Python 3.10+；当前在 Python 3.12 上验证。
+
+```powershell
+python -m pip install -r requirements.txt
 python monitor.pyw
 ```
 
-## 实现
+构建单文件可执行程序：
 
-单文件 `monitor.pyw`。采样走 Win32 API（`GetSystemTimes`、`GetIfTable2`、`GetExtendedTcpTable` 等），GPU 读 `nvidia-smi`；任务栏那层用 `WS_EX_LAYERED` + `UpdateLayeredWindow` 做逐像素透明，界面由 Pillow 渲染。
+```powershell
+python -m pip install -r requirements-dev.txt
+python tools/build.py
+```
+
+输出为 `dist/DesktopMonitor.exe`，已包含图标、Pillow 与 Tk。`main` 分支推送后自动检查并构建；推送 `v*` 标签会发布对应 Release。
+
+## 数据与配置
+
+- CPU、内存、磁盘、网络使用 Windows API；网速汇总活动物理网卡，不计算 VPN、虚拟网卡与回环流量。速度单位为字节/秒。
+- GPU 读取首块 NVIDIA 显卡的 `nvidia-smi`。AMD / Intel 或传感器不可用时显示占位，其余指标继续工作。
+- CPU 温度优先读取已运行的 LibreHardwareMonitor / OpenHardwareMonitor；ACPI 热区会标注“热区”，可能不代表 CPU 核心温度。
+- 进程内存为工作集；TCP 是非监听连接数，不代表进程实时网速。部分受保护进程无法读取明细。
+- 打包版配置与错误日志位于 `%LOCALAPPDATA%\DesktopMonitor`，首次运行可迁移 exe 旁的旧配置；源码版保存在项目目录。可用 `DM_CONFIG_PATH` 指定独立配置路径。
+
+## 验证
+
+```powershell
+python -m unittest discover -s tests -v
+python tools/ui_selftest.py
+python monitor.pyw --selftest
+```
+
+UI 自检使用临时配置，覆盖显示模式、主题、设置、全屏恢复、计时器与 GDI 资源释放，不改动现有偏好或自启动设置。完整改动见 [更新记录](CHANGELOG.md)。
 
 ## 许可
 

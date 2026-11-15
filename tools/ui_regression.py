@@ -1,0 +1,131 @@
+"""Exercise real Windows/Tk/GDI paths without changing user preferences."""
+import ctypes
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="desktop-monitor-ui-") as folder:
+        os.environ["DM_CONFIG_PATH"] = str(Path(folder) / "config.json")
+        loader = importlib.machinery.SourceFileLoader("monitor_ui_test", str(ROOT / "monitor.pyw"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mon = importlib.util.module_from_spec(spec)
+        loader.exec_module(mon)
+        app = mon.MonitorApp()
+        failures = []
+        app.root.report_callback_exception = lambda *exc: failures.append(exc)
+
+        def pump(seconds=0.05):
+            until = time.monotonic() + seconds
+            while time.monotonic() < until:
+                app.root.update()
+                time.sleep(0.01)
+
+        try:
+            pump()
+            for mode in ("card", "mini", "tray", "taskbar", "card", "tray"):
+                app.set_mode(mode)
+                pump()
+                app.dock_loop()
+                pump()
+                assert app.mode == mode
+                if app.strip is not None:
+                    assert bool(mon._u32.IsWindowVisible(app.strip.hwnd)) == (mode == "taskbar")
+                if mode == "tray":
+                    assert app.root.state() == "withdrawn"
+            app.show_detail()
+            pump()
+            assert app.mode == "tray" and app._popup_win
+            app.hide_detail()
+            assert app.mode == "tray" and app.root.state() == "withdrawn"
+
+            for theme in mon.CARD_THEMES:
+                app.set_card_theme(theme)
+                for mode in ("card", "mini"):
+                    app.set_mode(mode)
+                    pump()
+                    assert app.canvas.find_all()
+                app.set_mode("taskbar")
+                app.show_detail()
+                pump()
+                app.card_action(330, 388, 1)
+                pump()
+                assert app._proc_expanded
+                app.card_action(330, 388, 1)
+                assert not app._proc_expanded
+                timers = app.root.tk.splitlist(app.root.tk.call("after", "info"))
+                assert len([t for t in timers if "_popup_watch" in str(app.root.tk.call("after", "info", t))]) == 1
+                app.hide_detail()
+            for tab in ("appearance", "behavior", "about"):
+                app.open_settings(tab)
+                pump()
+                assert app._set_win.winfo_exists()
+            app._close_settings()
+            app.set_card_theme("dark")
+            app.set_mode("card")
+            app.set_alpha(0.8)
+            pump()
+            assert abs(app.root.attributes("-alpha") - 0.8) < 0.01
+            for interval in (500, 2000, 1000):
+                app.set_interval(interval)
+            timers = app.root.tk.splitlist(app.root.tk.call("after", "info"))
+            tick_timers = [t for t in timers if "tick" in str(app.root.tk.call("after", "info", t))]
+            assert len(tick_timers) == 1, tick_timers
+            cfg = json.loads(Path(mon.CFG_PATH).read_text(encoding="utf-8"))
+            assert cfg["alpha"] == 0.8 and cfg["interval"] == 1000
+
+            for mode in ("taskbar", "card", "mini", "tray"):
+                app.set_mode(mode)
+                with patch.object(mon, "fullscreen_foreground", return_value=True), \
+                     patch.object(mon, "same_monitor", return_value=True):
+                    app._sync_fullscreen()
+                    app.dock_now(force=True)
+                    assert app._fs_hidden
+                    assert app.root.state() == "withdrawn"
+                    if app.strip:
+                        assert not mon._u32.IsWindowVisible(app.strip.hwnd)
+                with patch.object(mon, "fullscreen_foreground", return_value=False):
+                    app._sync_fullscreen()
+                assert app.mode == mode and not app._fs_hidden
+
+            app.set_mode("taskbar")
+            for edge in (0, 1, 2, 3):
+                with patch.object(mon, "taskbar_position", return_value=(0, 0, 800, 60, edge)):
+                    app.dock_now(force=True)
+                    rect = app.card_rect()
+                    assert rect[2] > 0 and rect[3] > 0
+            app.set_mode("card")
+            with patch.object(app, "work_area", return_value=(-1920, -900, 1920, 860)):
+                x, y, w, h = app.card_rect()
+                assert -1920 <= x <= -w and -900 <= y <= -40 - h
+
+            app.set_mode("taskbar")
+            mon._k32.GetCurrentProcess.restype = ctypes.c_void_p
+            mon._u32.GetGuiResources.argtypes = [ctypes.c_void_p, mon.wt.DWORD]
+            process = mon._k32.GetCurrentProcess()
+            before = mon._u32.GetGuiResources(process, 0)
+            if app.strip is not None:
+                for _ in range(60):
+                    app.strip.update(app._compose_strip(app.strip.w, app.strip.h))
+            for i in range(60):
+                app.tray.update_tip(f"Regression check {i}")
+            after = mon._u32.GetGuiResources(process, 0)
+            assert after - before < 5, (before, after)
+            assert not failures, failures
+            error_log = Path(folder) / "error.log"
+            assert not error_log.exists(), error_log.read_text(encoding="utf-8") if error_log.exists() else ""
+            print("UI SELFTEST OK: modes, themes, settings, timers, fullscreen, edges, GDI resources", flush=True)
+        finally:
+            app.quit()
+
+
+if __name__ == "__main__":
+    main()
