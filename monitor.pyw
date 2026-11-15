@@ -33,7 +33,7 @@ from contextlib import contextmanager
 import math
 
 APP_NAME = "桌面性能监视器"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 RESOURCES = getattr(sys, "_MEIPASS", BASE)
 DATA_DIR = (os.path.join(os.environ.get("LOCALAPPDATA", BASE), "DesktopMonitor")
@@ -85,18 +85,21 @@ CARD_THEMES = {
 
 STRIP_STYLES = {"minimal": "融入", "glass": "雾面", "tiles": "分舱",
                 "outline": "细线", "ribbon": "能量", "neon": "霓虹"}
-STRIP_LAYOUTS = {"duo": ("双行", 218), "inline": ("横排", 282),
-                 "gauges": ("圆环", 258), "trends": ("趋势", 298)}
+STRIP_LAYOUTS = {"micro": ("紧凑", 148), "duo": ("双行", 188), "inline": ("横排", 228),
+                 "gauges": ("圆环", 190), "trends": ("趋势", 244)}
+STRIP_HEIGHTS = {"micro": 28, "duo": 32, "inline": 32, "gauges": 32, "trends": 32}
 STRIP_PROFILES = {
     "balanced": ("均衡", ("cpu", "mem", "down", "up")),
     "hardware": ("硬件", ("cpu", "mem", "gpu", "gpu_temp")),
     "network": ("网络", ("down", "up", "total_down", "total_up")),
     "battery": ("续航", ("cpu", "mem", "battery", "uptime")),
 }
+STRIP_PROFILE_HINTS = {"balanced": "CPU · 内存 · 下载 · 上传", "hardware": "CPU · 内存 · GPU · 显卡温度",
+                       "network": "下载 · 上传 · 累计收发", "battery": "CPU · 内存 · 电池 · 运行时长"}
 STRIP_ACCENTS = {"mint": "薄荷", "blue": "冰川", "violet": "鸢尾", "amber": "琥珀", "mono": "单色"}
 STRIP_SIZES = {"small": ("小巧", 0.88), "normal": ("标准", 1.0), "large": ("清晰", 1.12)}
-STRIP_DEFAULTS = {"style": "tiles", "strip_layout": "inline", "strip_profile": "balanced",
-                  "strip_accent": "mint", "strip_size": "normal"}
+STRIP_DEFAULTS = {"style": "minimal", "strip_layout": "micro", "strip_profile": "balanced",
+                  "strip_accent": "mono", "strip_size": "small"}
 STRIP_CHOICES = {"style": STRIP_STYLES, "strip_layout": STRIP_LAYOUTS, "strip_profile": STRIP_PROFILES,
                  "strip_accent": STRIP_ACCENTS, "strip_size": STRIP_SIZES}
 
@@ -1506,12 +1509,14 @@ class StripPainter:
         self.style = self.options["style"]
         self.layout = self.options["strip_layout"]
         self.dw = STRIP_LAYOUTS[self.layout][1]
-        self.scale = min(width / self.dw, height / 46)
+        self.dh = STRIP_HEIGHTS[self.layout]
+        self.y_scale = self.dh / 44
+        self.scale = min(width / self.dw, height / self.dh)
         self.k = self.scale * 3
-        self.ox, self.oy = (width - self.dw * self.scale) / 2, (height - 44 * self.scale) / 2
+        self.ox, self.oy = (width - self.dw * self.scale) / 2, (height - self.dh * self.scale) / 2
         self.image = Image.new("RGBA", (width * 3, height * 3), (0, 0, 0, 0))
         self.d = ImageDraw.Draw(self.image)
-        self.font_factor = 1.1 if self.options["strip_size"] == "large" else 1.0
+        self.font_factor = (1.0 if self.layout == "micro" else 0.86) * (1.08 if self.options["strip_size"] == "large" else 1.0)
         self.p = app.palette()
         self.light = self.p["light"]
         self.hover = options.get("hover", getattr(app, "_strip_hover", False))
@@ -1524,7 +1529,7 @@ class StripPainter:
         self.colors = [self.p[key] for key in variants[self.options["strip_accent"]]]
 
     def point(self, x, y):
-        return round(self.ox * 3 + x * self.k), round(self.oy * 3 + y * self.k)
+        return round(self.ox * 3 + x * self.k), round(self.oy * 3 + y * self.k * self.y_scale)
 
     def rect(self, box, fill, radius=8, outline=None, stroke=0.7):
         self.d.rounded_rectangle((*self.point(*box[:2]), *self.point(*box[2:])),
@@ -1603,8 +1608,8 @@ class StripPainter:
         if self.style == "minimal":
             return
         if self.style == "tiles":
-            count = 2 if self.layout == "duo" else 4
-            gap, pad = 5, 2
+            count = 2 if self.layout in ("duo", "micro") else 4
+            gap, pad = 3, 2
             width = (self.dw - 2 * pad - gap * (count - 1)) / count
             for i in range(count):
                 x = pad + i * (width + gap)
@@ -1630,7 +1635,20 @@ class StripPainter:
         self.background()
         ink, dim = (*self.p["ink"], 255), (*self.p["dim"], 255)
         indicators = (self.app.cfg.get("strip_indicators", True) and self.style not in ("minimal", "glass")) or self.style == "ribbon"
-        if self.layout == "duo":
+        if self.layout == "micro":
+            cell = (self.dw - 6) / 2
+            tags = {"cpu": "CPU", "mem": "RAM", "gpu": "GPU", "gpu_temp": "温度",
+                    "down": "↓", "up": "↑", "total_down": "收", "total_up": "发",
+                    "battery": "BAT", "uptime": "运行"}
+            for i, original in enumerate(self.metrics):
+                metric = dict(original)
+                if metric["key"] in ("down", "up"):
+                    metric["unit"] = metric["unit"].replace("B/s", "").strip() or ("B" if metric["raw"] is not None else "")
+                group, row = divmod(i, 2)
+                x, y = 2 + group * (cell + 2), 11 + row * 22
+                self.text(x + 4, y, tags[metric["key"]], 7.4, dim)
+                self.value(x + cell - 5, y, metric, 9.8, cell - 26, ink)
+        elif self.layout == "duo":
             width = (self.dw - 9) / 2
             for i, metric in enumerate(self.metrics):
                 group, row = divmod(i, 2)
@@ -1655,7 +1673,9 @@ class StripPainter:
                         self.indicator((x + 10, 38, x + cell - 10, 39.2), metric, color)
                 elif self.layout == "gauges":
                     if metric["level"] is not None:
-                        box = (*self.point(center - 11, 5), *self.point(center + 11, 27))
+                        radius = 8
+                        y_radius = radius / self.y_scale
+                        box = (*self.point(center - radius, 16 - y_radius), *self.point(center + radius, 16 + y_radius))
                         self.d.arc(box, 0, 360, fill=(*color, 35), width=max(1, round(2.3 * self.k)))
                         if metric["level"] > 0:
                             self.d.arc(box, -90, -90 + 3.6 * metric["level"], fill=(*color, 255), width=max(1, round(2.3 * self.k)))
@@ -2086,15 +2106,18 @@ class MonitorApp:
             return False
         tx, ty, tw, th, edge = pos
         w = self.strip_w
-        margin = round(12 * self.scale)
+        margin = round(8 * self.scale)
+        density = STRIP_SIZES[self.cfg["strip_size"]][1]
+        content_h = round(STRIP_HEIGHTS[self.cfg["strip_layout"]] * self.scale * density)
         if edge in (1, 3):
             kids = taskbar_children()
             tray = kids.get("TrayNotifyWnd")
             tray_left = tray[0] if tray else tx + tw - round(250 * self.scale)
             x = max(tx + margin, tray_left - margin - w)
-            y, h = ty + 1, max(24, th - 2)
+            h = min(max(20, th - 4), content_h + 2)
+            y = ty + (th - h) // 2
         else:
-            h = round(self.STRIP_H * self.scale)
+            h = content_h + 2
             x = tx + tw + margin if edge == 0 else tx - w - margin
             y = ty + th - h - margin
         rect = tuple(map(int, (x, y, w, h)))
@@ -2432,16 +2455,14 @@ class MonitorApp:
         label = getattr(self, "_settings_preview_label", None)
         if label is None or not label.winfo_exists():
             return
-        p = CARD_THEMES[self.card_theme]
-        scale = min(self.scale, self.work_area()[2] / 720)
-        width = min(round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * scale * STRIP_SIZES[self.cfg["strip_size"]][1]), round(540 * scale))
-        height = round(54 * scale)
+        scale = min(self.scale, self.work_area()[2] / 480) * STRIP_SIZES[self.cfg["strip_size"]][1]
+        width = round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * scale)
+        height = round(STRIP_HEIGHTS[self.cfg["strip_layout"]] * scale)
         bg = (235, 240, 248, 255) if self.palette()["light"] else (16, 23, 35, 255)
-        composite = Image.new("RGBA", (width + round(28 * scale), height + round(10 * scale)), bg)
-        image = self._compose_strip(width, height)
-        composite.alpha_composite(image, (round(14 * scale), round(5 * scale)))
-        self._settings_preview = ImageTk.PhotoImage(composite.convert("RGB"), master=self.root)
-        label.configure(image=self._settings_preview, bg=p["surface"])
+        image = Image.new("RGBA", (width, height), bg)
+        image.alpha_composite(self._compose_strip(width, height))
+        self._settings_preview = ImageTk.PhotoImage(image.convert("RGB"), master=self.root)
+        label.configure(image=self._settings_preview, bg=CARD_THEMES[self.card_theme]["bg"])
 
     def set_card_theme(self, name):
         if name not in CARD_THEMES:
@@ -2685,10 +2706,10 @@ class MonitorApp:
         win.bind("<Escape>", lambda e: self._close_settings())
         win.bind("<Control-q>", lambda e: self.quit())
         ax, ay, aw, ah = self.work_area()
-        scale = min(self.scale, (aw - 40) / 680)
-        w, h = round(680 * scale), min(round(820 * scale), ah - 70)
+        scale = min(self.scale, (aw - 40) / 460)
+        w, h = round(460 * scale), min(round(560 * scale), ah - 70)
         self.place_window(win, w, h, ax + (aw - w) // 2, ay + (ah - h) // 2)
-        win.minsize(min(w, round(440 * scale)), min(h, round(400 * scale)))
+        win.minsize(min(w, round(360 * scale)), min(h, round(320 * scale)))
         self.render_settings()
         win.deiconify()
         win.lift()
@@ -2716,23 +2737,22 @@ class MonitorApp:
             dwm.DwmSetWindowAttribute(int(win.wm_frame(), 16), 20, ctypes.byref(value), ctypes.sizeof(value))
         except (OSError, AttributeError):
             pass
-        scale = min(self.scale, self.work_area()[2] / 720)
+        scale = min(self.scale, self.work_area()[2] / 480)
         px = lambda n: max(1, round(n * scale))
         font = lambda n, bold=False: (self.f_cn, -px(n), "bold" if bold else "normal")
-        header = tk.Frame(win, bg=p["bg"], padx=px(26), pady=px(20))
+        header = tk.Frame(win, bg=p["bg"], padx=px(14), pady=px(10))
         header.pack(fill="x")
-        tk.Label(header, text="偏好设置", font=font(23, True), bg=p["bg"], fg=p["text"], anchor="w").pack(fill="x")
-        tk.Label(header, text="让监视器融入你的桌面。", font=font(11), bg=p["bg"], fg=p["dim"], anchor="w").pack(fill="x", pady=(px(5), 0))
-        navigation = tk.Frame(win, bg=p["bg"], padx=px(26))
-        navigation.pack(fill="x", pady=(0, px(14)))
+        tk.Label(header, text="偏好设置", font=font(16, True), bg=p["bg"], fg=p["text"], anchor="w").pack(fill="x")
+        navigation = tk.Frame(win, bg=p["bg"], padx=px(14))
+        navigation.pack(fill="x", pady=(0, px(8)))
 
         def button(parent, label, command, selected=False, primary=False):
             bg = p["teal"] if primary else (p["track"] if selected else p["surface"])
             fg = p["bg"] if primary else (p["teal"] if selected else p["dim"])
-            b = tk.Button(parent, text=label, command=command, font=font(11, selected or primary),
+            b = tk.Button(parent, text=label, command=command, font=font(10, selected or primary),
                 bg=bg, fg=fg, activebackground=p["track"], activeforeground=p["text"],
                 bd=0, relief="flat", highlightthickness=1, highlightbackground=p["border"],
-                highlightcolor=p["teal"], cursor="hand2", padx=px(12), pady=px(9), takefocus=True)
+                highlightcolor=p["teal"], cursor="hand2", padx=px(7), pady=px(5), takefocus=True)
             b.bind("<Enter>", lambda e: b.configure(bg=p["track"]) if not primary else None)
             b._normal_bg = bg
             b.bind("<Leave>", lambda e: b.configure(bg=b._normal_bg))
@@ -2747,17 +2767,16 @@ class MonitorApp:
             button(navigation, label, lambda k=key: switch_tab(k), self._settings_tab == key).grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else px(6), 0))
 
         if self._settings_tab == "appearance":
-            live = tk.Frame(win, bg=p["surface"], padx=px(16), pady=px(10))
-            live.pack(fill="x", padx=px(26), pady=(0, px(14)))
-            top = tk.Frame(live, bg=p["surface"])
+            live = tk.Frame(win, bg=p["bg"], padx=px(4), pady=px(3))
+            live.pack(fill="x", padx=px(14), pady=(0, px(8)))
+            top = tk.Frame(live, bg=p["bg"])
             top.pack(fill="x")
-            tk.Label(top, text="任务栏实时预览", bg=p["surface"], fg=p["dim"], font=font(10, True)).pack(side="left")
-            tk.Label(top, text="点击下方样式即可应用", bg=p["surface"], fg=p["faint"], font=font(9)).pack(side="right")
+            tk.Label(top, text="实际大小预览", bg=p["bg"], fg=p["dim"], font=font(10, True)).pack(side="left")
             self._settings_preview_label = tk.Label(live, bg=p["surface"], bd=0)
-            self._settings_preview_label.pack(anchor="center", pady=(px(6), 0))
+            self._settings_preview_label.pack(anchor="center", pady=(px(3), 0))
             self.refresh_settings_preview()
 
-        footer = tk.Frame(win, bg=p["bg"], padx=px(26), pady=px(14))
+        footer = tk.Frame(win, bg=p["bg"], padx=px(14), pady=px(8))
         footer.pack(side="bottom", fill="x")
         self._settings_status = tk.Label(footer, text="更改自动保存", font=font(10), bg=p["bg"], fg=p["faint"])
         self._settings_status.pack(side="left")
@@ -2776,19 +2795,19 @@ class MonitorApp:
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
         canvas.configure(yscrollcommand=scrollbar.set)
-        content = tk.Frame(canvas, bg=p["bg"], padx=px(26))
+        content = tk.Frame(canvas, bg=p["bg"], padx=px(14))
         item = canvas.create_window(0, 0, window=content, anchor="nw")
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=e.width))
         content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-int(e.delta / 120), "units") if canvas.winfo_height() < content.winfo_height() and not isinstance(e.widget, tk.Scale) else None)
 
         def section(title, subtitle=""):
-            frame = tk.Frame(content, bg=p["surface"], padx=px(16), pady=px(13),
+            frame = tk.Frame(content, bg=p["surface"], padx=px(10), pady=px(7),
                              highlightthickness=1, highlightbackground=p["border"])
-            frame.pack(fill="x", pady=(0, px(12)))
-            tk.Label(frame, text=title, font=font(12, True), bg=p["surface"], fg=p["text"], anchor="w").pack(fill="x")
+            frame.pack(fill="x", pady=(0, px(6)))
+            tk.Label(frame, text=title, font=font(10, True), bg=p["surface"], fg=p["text"], anchor="w").pack(fill="x")
             if subtitle:
-                label = tk.Label(frame, text=subtitle, font=font(10), bg=p["surface"], fg=p["dim"], anchor="w", justify="left", wraplength=px(470))
+                label = tk.Label(frame, text=subtitle, font=font(9), bg=p["surface"], fg=p["dim"], anchor="w", justify="left", wraplength=px(470))
                 label.pack(fill="x", pady=(px(4), px(3)))
                 frame.bind("<Configure>", lambda e: label.configure(wraplength=max(px(200), e.width - px(34))))
             return frame
@@ -2796,7 +2815,7 @@ class MonitorApp:
         def segments(title, options, current, command, subtitle=""):
             frame = section(title, subtitle)
             row = tk.Frame(frame, bg=p["surface"])
-            row.pack(fill="x", pady=(px(10), 0))
+            row.pack(fill="x", pady=(px(6), 0))
             buttons = []
             def select(value):
                 command(value)
@@ -2805,7 +2824,7 @@ class MonitorApp:
                 for val, control in buttons:
                     control._normal_bg = p["track"] if val == value else p["surface"]
                     control.configure(bg=p["track"] if val == value else p["surface"],
-                                      fg=p["teal"] if val == value else p["dim"], font=font(11, val == value))
+                                      fg=p["teal"] if val == value else p["dim"], font=font(10, val == value))
             for i, (value, label) in enumerate(options):
                 row.columnconfigure(i, weight=1, uniform=title)
                 control = button(row, label, lambda v=value: select(v), value == current)
@@ -2816,8 +2835,8 @@ class MonitorApp:
         def slider(title, subtitle, low, high, step, current, command, format_value):
             frame = section(title, subtitle)
             row = tk.Frame(frame, bg=p["surface"])
-            row.pack(fill="x", pady=(px(10), 0))
-            label = tk.Label(row, text=format_value(current), bg=p["surface"], fg=p["teal"], font=font(12, True), width=7, anchor="e")
+            row.pack(fill="x", pady=(px(6), 0))
+            label = tk.Label(row, text=format_value(current), bg=p["surface"], fg=p["teal"], font=font(10, True), width=7, anchor="e")
             label.pack(side="right")
             var = tk.DoubleVar(value=current)
             self._settings_vars.append(var)
@@ -2829,7 +2848,7 @@ class MonitorApp:
                 command=changed, orient="horizontal", showvalue=False, bg=p["surface"],
                 fg=p["text"], troughcolor=p["track"], activebackground=p["teal"],
                 bd=0, highlightthickness=0, sliderrelief="flat", width=px(7), sliderlength=px(17),
-                length=px(330), takefocus=True)
+                length=px(230), takefocus=True)
             control.pack(side="left", fill="x", expand=True, padx=(0, px(12)))
 
         def toggle(title, subtitle, current, command):
@@ -2846,28 +2865,19 @@ class MonitorApp:
                 highlightthickness=0, cursor="hand2", anchor="w").pack(anchor="w", pady=(px(7), 0))
 
         if self._settings_tab == "appearance":
-            frame = section("选择任务栏样式", "外观与排版可自由组合，所有样式都支持深浅任务栏。")
+            frame = section("任务栏样式")
             grid = tk.Frame(frame, bg=p["surface"])
-            grid.pack(fill="x", pady=(px(8), 0))
-            self._style_photos = []
+            grid.pack(fill="x", pady=(px(5), 0))
             for index, (key, name) in enumerate(STRIP_STYLES.items()):
-                thumb_w, thumb_h = px(146), px(39)
-                thumb = self._compose_strip(thumb_w, thumb_h, style=key, hover=False)
-                background = (235, 240, 248, 255) if self.palette()["light"] else (16, 23, 35, 255)
-                sample = Image.new("RGBA", thumb.size, background)
-                sample.alpha_composite(thumb)
-                photo = ImageTk.PhotoImage(sample.convert("RGB"), master=self.root)
-                self._style_photos.append(photo)
-                control = button(grid, name + ("  ✓" if self.style == key else ""),
+                control = button(grid, name + (" ✓" if self.style == key else ""),
                                  lambda value=key: self.set_style(value), self.style == key)
-                control.configure(image=photo, compound="top", padx=px(7), pady=px(8))
                 grid.columnconfigure(index % 3, weight=1, uniform="styles")
-                control.grid(row=index // 3, column=index % 3, sticky="ew", padx=px(3), pady=px(3))
+                control.grid(row=index // 3, column=index % 3, sticky="ew", padx=px(2), pady=px(2))
             segments("展示排版", [(key, item[0]) for key, item in STRIP_LAYOUTS.items()], self.cfg["strip_layout"],
                      lambda value: self.set_strip_option("strip_layout", value))
             segments("展示指标", [(key, item[0]) for key, item in STRIP_PROFILES.items()], self.cfg["strip_profile"],
                      lambda value: self.set_strip_option("strip_profile", value),
-                     "均衡：CPU / 内存 / 上下行 · 硬件：CPU / 内存 / GPU / 温度\n网络：速度与累计流量 · 续航：CPU / 内存 / 电池 / 运行时长")
+                     STRIP_PROFILE_HINTS[self.cfg["strip_profile"]])
             segments("强调色", list(STRIP_ACCENTS.items()), self.cfg["strip_accent"],
                      lambda value: self.set_strip_option("strip_accent", value))
             segments("显示尺寸", [(key, item[0]) for key, item in STRIP_SIZES.items()], self.cfg["strip_size"],
