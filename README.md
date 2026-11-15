@@ -15,7 +15,7 @@
 
 已发布版本见 [Releases](https://github.com/1181110317/desktop-monitor/releases)。最新代码的可执行文件可从 [Windows 构建](https://github.com/1181110317/desktop-monitor/actions/workflows/windows.yml) 下载 `DesktopMonitor-Windows-x64` 产物。
 
-解压后运行 `DesktopMonitor.exe`，无需安装 Python。升级前从托盘菜单退出旧版，再运行新版。
+新版提供 `DesktopMonitor-Windows-x64.zip`。完整解压后运行文件夹内的 `DesktopMonitor.exe`，无需安装 Python，支持中文路径。请将 exe 与 `_internal` 文件夹一起保留。升级前从托盘菜单退出旧版，再运行新版。
 
 | 操作 | 效果 |
 | --- | --- |
@@ -35,14 +35,14 @@ python -m pip install -r requirements.txt
 python monitor.pyw
 ```
 
-构建单文件可执行程序：
+构建便携版：
 
 ```powershell
 python -m pip install -r requirements-dev.txt
 python tools/build.py
 ```
 
-输出为 `dist/DesktopMonitor.exe`，已包含图标、Pillow 与 Tk。`main` 分支推送后自动检查并构建；推送 `v*` 标签会发布对应 Release。
+输出为 `dist/DesktopMonitor/DesktopMonitor.exe` 和 `dist/DesktopMonitor-Windows-x64.zip`，已包含图标、Pillow 与 Tk。`main` 分支推送后自动检查并构建；推送 `v*` 标签会发布对应 Release。
 
 ## 数据与配置
 
@@ -58,6 +58,8 @@ python tools/build.py
 python -m unittest discover -s tests -v
 python tools/ui_selftest.py
 python monitor.pyw --selftest
+# 打包后验证原路径和中文路径
+python tools/check_packaged.py
 ```
 
 UI 自检使用临时配置，覆盖显示模式、主题、设置、全屏恢复、计时器与 GDI 资源释放，不改动现有偏好或自启动设置。完整改动见 [更新记录](CHANGELOG.md)。

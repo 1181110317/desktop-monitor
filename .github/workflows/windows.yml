@@ -29,10 +29,12 @@ jobs:
           python tools/ui_selftest.py
       - name: Build executable
         run: python tools/build.py
+      - name: Check packaged startup and Unicode paths
+        run: python tools/check_packaged.py
       - uses: actions/upload-artifact@v4
         with:
           name: DesktopMonitor-Windows-x64
-          path: dist/DesktopMonitor.exe
+          path: dist/DesktopMonitor-Windows-x64.zip
           if-no-files-found: error
 
   release:
@@ -50,4 +52,4 @@ jobs:
       - name: Publish tagged build
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/DesktopMonitor.exe --title "Desktop Monitor $GITHUB_REF_NAME" --notes-file CHANGELOG.md
+        run: gh release create "$GITHUB_REF_NAME" release/DesktopMonitor-Windows-x64.zip --title "Desktop Monitor $GITHUB_REF_NAME" --notes-file CHANGELOG.md
