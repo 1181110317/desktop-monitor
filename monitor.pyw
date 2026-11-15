@@ -33,7 +33,7 @@ from contextlib import contextmanager
 import math
 
 APP_NAME = "桌面性能监视器"
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.2.0"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 RESOURCES = getattr(sys, "_MEIPASS", BASE)
 DATA_DIR = (os.path.join(os.environ.get("LOCALAPPDATA", BASE), "DesktopMonitor")
@@ -89,13 +89,20 @@ STRIP_LAYOUTS = {"classic": ("首版", 148), "micro": ("微型", 148), "duo": ("
                  "gauges": ("圆环", 190), "trends": ("趋势", 244)}
 STRIP_HEIGHTS = {"classic": 40, "micro": 28, "duo": 32, "inline": 32, "gauges": 32, "trends": 32}
 STRIP_PROFILES = {
-    "balanced": ("均衡", ("cpu", "mem", "down", "up")),
+    "balanced": ("均衡", ("cpu", "mem", "up", "down")),
     "hardware": ("硬件", ("cpu", "mem", "gpu", "gpu_temp")),
     "network": ("网络", ("down", "up", "total_down", "total_up")),
     "battery": ("续航", ("cpu", "mem", "battery", "uptime")),
 }
-STRIP_PROFILE_HINTS = {"balanced": "CPU · 内存 · 下载 · 上传", "hardware": "CPU · 内存 · GPU · 显卡温度",
-                       "network": "下载 · 上传 · 累计收发", "battery": "CPU · 内存 · 电池 · 运行时长"}
+STRIP_METRICS = {
+    "cpu": ("CPU 占用", "CPU"), "mem": ("内存占用", "RAM"),
+    "gpu": ("GPU 占用", "GPU"), "vram": ("显存占用", "VRAM"),
+    "cpu_temp": ("CPU 温度", "CPU°"), "gpu_temp": ("GPU 温度", "GPU°"),
+    "up": ("上传速度", "上传"), "down": ("下载速度", "下载"),
+    "total_up": ("累计上传", "已发"), "total_down": ("累计下载", "已收"),
+    "disk": ("系统盘占用", "磁盘"), "battery": ("电池电量", "电池"),
+    "uptime": ("运行时长", "运行"),
+}
 STRIP_ACCENTS = {"mint": "薄荷", "blue": "冰川", "violet": "鸢尾", "amber": "琥珀", "mono": "单色"}
 STRIP_SIZES = {"small": ("小巧", 0.88), "normal": ("标准", 1.0), "large": ("清晰", 1.12)}
 STRIP_DEFAULTS = {"style": "minimal", "strip_layout": "classic", "strip_profile": "balanced",
@@ -104,27 +111,64 @@ STRIP_CHOICES = {"style": STRIP_STYLES, "strip_layout": STRIP_LAYOUTS, "strip_pr
                  "strip_accent": STRIP_ACCENTS, "strip_size": STRIP_SIZES}
 
 
-def strip_metrics(state, profile="balanced"):
-    """Format the four selected measurements, keeping missing readings distinct from zero."""
+def clean_strip_items(items):
+    """Keep supported measurements once, in the user's display order."""
+    if not isinstance(items, (list, tuple)):
+        return []
+    result = []
+    for key in items:
+        if isinstance(key, str) and key in STRIP_METRICS and key not in result:
+            result.append(key)
+    return result
+
+
+def selected_strip_items(cfg, **options):
+    profile = options.get("strip_profile", cfg.get("strip_profile", "balanced"))
+    items = options.get("strip_items", None if "strip_profile" in options else cfg.get("strip_items"))
+    return clean_strip_items(items) or list(STRIP_PROFILES.get(profile, STRIP_PROFILES["balanced"])[1])
+
+
+def strip_profile_for_items(items):
+    return next((key for key, (_, values) in STRIP_PROFILES.items() if tuple(items) == values), "custom")
+
+
+def strip_design_width(layout, count):
+    columns = math.ceil(count / 2) if layout in ("classic", "micro", "duo") else count
+    reference = 2 if layout in ("classic", "micro", "duo") else 4
+    gap = 2 if layout == "micro" else (5 if layout == "duo" else 0)
+    cell = (STRIP_LAYOUTS[layout][1] - 4 - gap * (reference - 1)) / reference
+    return 4 + columns * cell + (columns - 1) * gap
+
+
+def strip_design_height(layout, count):
+    return 24 if count == 1 and layout in ("classic", "micro", "duo") else STRIP_HEIGHTS[layout]
+
+
+def strip_metrics(state, profile="balanced", items=None):
+    """Format selected measurements, keeping unavailable readings distinct from zero."""
     gpu = state.get("gpu") or {}
     battery = state.get("battery") or {}
+    def percentage(used, total):
+        if all(isinstance(v, (int, float)) and math.isfinite(v) for v in (used, total)) and total > 0:
+            return clamp(used / total * 100, 0, 100)
+        return None
+    disk_total, disk_free = state.get("disk_total"), state.get("disk_free")
+    disk_used = disk_total - disk_free if all(isinstance(v, (int, float)) for v in (disk_total, disk_free)) else None
     values = {"cpu": state.get("cpu"), "mem": state.get("mem_pct"), "gpu": gpu.get("util"),
-              "gpu_temp": gpu.get("temp"), "battery": battery.get("pct")}
-    names = {"cpu": ("处理器", "CPU"), "mem": ("内存", "RAM"), "gpu": ("显卡", "GPU"),
-             "gpu_temp": ("显卡温度", "温度"), "battery": ("电池", "电池"),
-             "down": ("下载", "下载"), "up": ("上传", "上传"),
-             "total_down": ("累计下载", "已收"), "total_up": ("累计上传", "已发"),
-             "uptime": ("运行时长", "运行")}
+              "vram": percentage(gpu.get("mem_used"), gpu.get("mem_total")),
+              "cpu_temp": state.get("cpu_temp"), "gpu_temp": gpu.get("temp"),
+              "disk": percentage(disk_used, disk_total), "battery": battery.get("pct")}
     result = []
-    for key in STRIP_PROFILES.get(profile, STRIP_PROFILES["balanced"])[1]:
+    for key in selected_strip_items({"strip_profile": profile, "strip_items": items}):
         raw = values.get(key) if key in values else state.get(key)
         raw = float(raw) if isinstance(raw, (int, float)) and math.isfinite(raw) else None
         value, unit, level = "—", "", None
         if key in values:
-            unit = "°C" if key == "gpu_temp" else "%"
+            temperature = key in ("cpu_temp", "gpu_temp")
+            unit = "°C" if temperature else "%"
             if raw is not None:
-                value = f"{clamp(raw, 0, 150 if key == 'gpu_temp' else 100):.0f}"
-                level = clamp(raw / 110 * 100 if key == "gpu_temp" else raw, 0, 100)
+                value = f"{clamp(raw, 0, 150 if temperature else 100):.0f}"
+                level = clamp(raw / 110 * 100 if temperature else raw, 0, 100)
         elif raw is not None:
             if key in ("up", "down"):
                 parts = fmt_speed(raw).split(" ")
@@ -134,7 +178,7 @@ def strip_metrics(state, profile="balanced"):
             else:
                 hours, minutes = divmod(max(0, int(raw)) // 60, 60)
                 value = f"{hours // 24}d {hours % 24}h" if hours >= 24 else f"{hours}h {minutes}m"
-        result.append(dict(key=key, label=names[key][0], tag=names[key][1], value=value,
+        result.append(dict(key=key, label=STRIP_METRICS[key][0], tag=STRIP_METRICS[key][1], value=value,
                            unit=unit if raw is not None else "", level=level, raw=raw))
     return result
 
@@ -1508,8 +1552,10 @@ class StripPainter:
                         for key, default in STRIP_DEFAULTS.items()}
         self.style = self.options["style"]
         self.layout = self.options["strip_layout"]
-        self.dw = STRIP_LAYOUTS[self.layout][1]
-        self.dh = STRIP_HEIGHTS[self.layout]
+        self.metrics = strip_metrics(getattr(app, "state", {}), items=selected_strip_items(app.cfg, **options))
+        self.columns = math.ceil(len(self.metrics) / 2) if self.layout in ("classic", "micro", "duo") else len(self.metrics)
+        self.dw = strip_design_width(self.layout, len(self.metrics))
+        self.dh = strip_design_height(self.layout, len(self.metrics))
         self.y_scale = self.dh / 44
         self.scale = min(width / self.dw, height / self.dh)
         self.k = self.scale * 3
@@ -1520,7 +1566,6 @@ class StripPainter:
         self.p = app.palette()
         self.light = self.p["light"]
         self.hover = options.get("hover", getattr(app, "_strip_hover", False))
-        self.metrics = strip_metrics(app.state, self.options["strip_profile"])
         variants = {
             "mint": ("teal", "blue", "violet", "amber"), "blue": ("blue", "teal", "violet", "amber"),
             "violet": ("violet", "blue", "teal", "amber"), "amber": ("amber", "violet", "blue", "teal"),
@@ -1564,11 +1609,11 @@ class StripPainter:
         metric = self.metrics[index]
         if metric["raw"] is None:
             return self.p["faint"]
-        if metric["key"] in ("cpu", "mem", "gpu_temp") and (metric["level"] or 0) >= 88:
+        if metric["key"] in ("cpu", "mem", "gpu", "vram", "disk", "cpu_temp", "gpu_temp") and (metric["level"] or 0) >= 88:
             return self.p["red"]
         if metric["key"] == "battery" and metric["raw"] <= 20:
             return self.p["amber"]
-        return self.colors[index]
+        return self.colors[index % len(self.colors)]
 
     def history(self, metric):
         return (self.app.hist.get(metric["key"]) or [])[-self.app.SPARK_N:]
@@ -1578,7 +1623,7 @@ class StripPainter:
         if not history:
             return
         x0, y0, x1, y1 = box
-        maximum = 100 if metric["key"] in ("cpu", "mem", "gpu", "battery") else (110 if metric["key"] == "gpu_temp" else max(max(history) * 1.1, 1))
+        maximum = 100 if metric["key"] in ("cpu", "mem", "gpu", "vram", "disk", "battery") else (110 if metric["key"] in ("cpu_temp", "gpu_temp") else max(max(history) * 1.1, 1))
         step = (x1 - x0) / (self.app.SPARK_N - 1)
         start = x1 - (len(history) - 1) * step
         points = [(start + i * step, y1 - clamp(v / maximum, 0, 1) * (y1 - y0)) for i, v in enumerate(history)]
@@ -1608,13 +1653,13 @@ class StripPainter:
         if self.style == "minimal":
             return
         if self.style == "tiles":
-            count = 2 if self.layout in ("classic", "duo", "micro") else 4
+            count = self.columns
             gap, pad = 3, 2
             width = (self.dw - 2 * pad - gap * (count - 1)) / count
             for i in range(count):
                 x = pad + i * (width + gap)
                 self.rect((x, 2, x + width, 42), (*self.p["surface"], 240 if self.hover else 219), 9,
-                          (*self.colors[i], 90 if self.hover else 35))
+                          (*self.colors[i % len(self.colors)], 90 if self.hover else 35))
             return
         fill = (*self.p["surface"], 160 if self.style == "glass" else 230)
         border = (*ink, 30)
@@ -1636,8 +1681,9 @@ class StripPainter:
         ink, dim = (*self.p["ink"], 255), (*self.p["dim"], 255)
         indicators = (self.app.cfg.get("strip_indicators", True) and self.style not in ("minimal", "glass")) or self.style == "ribbon"
         if self.layout == "micro":
-            cell = (self.dw - 6) / 2
-            tags = {"cpu": "CPU", "mem": "RAM", "gpu": "GPU", "gpu_temp": "温度",
+            cell = (self.dw - 4 - 2 * (self.columns - 1)) / self.columns
+            tags = {"cpu": "CPU", "mem": "RAM", "gpu": "GPU", "vram": "VRAM", "disk": "磁盘",
+                    "cpu_temp": "CPU°", "gpu_temp": "GPU°",
                     "down": "↓", "up": "↑", "total_down": "收", "total_up": "发",
                     "battery": "BAT", "uptime": "运行"}
             for i, original in enumerate(self.metrics):
@@ -1646,13 +1692,17 @@ class StripPainter:
                     metric["unit"] = metric["unit"].replace("B/s", "").strip() or ("B" if metric["raw"] is not None else "")
                 group, row = divmod(i, 2)
                 x, y = 2 + group * (cell + 2), 11 + row * 22
+                if i == len(self.metrics) - 1 and not row:
+                    y = 22
                 self.text(x + 4, y, tags[metric["key"]], 7.4, dim)
                 self.value(x + cell - 5, y, metric, 9.8, cell - 26, ink)
         elif self.layout == "duo":
-            width = (self.dw - 9) / 2
+            width = (self.dw - 4 - 5 * (self.columns - 1)) / self.columns
             for i, metric in enumerate(self.metrics):
                 group, row = divmod(i, 2)
                 x, y = 2 + group * (width + 5), 13 + row * 18
+                if i == len(self.metrics) - 1 and not row:
+                    y = 22
                 color = self.color(i)
                 self.rect((x + 9, y - 2, x + 12, y + 2), (*color, 255), 1.5)
                 self.text(x + 17, y, metric["tag"], 7.3, dim)
@@ -1660,7 +1710,7 @@ class StripPainter:
                 if indicators:
                     self.indicator((x + 9, y + 7, x + width - 9, y + 8.2), metric, color)
         else:
-            cell = (self.dw - 4) / 4
+            cell = (self.dw - 4) / self.columns
             for i, metric in enumerate(self.metrics):
                 x, color = 2 + i * cell, self.color(i)
                 center = x + cell / 2
@@ -1853,7 +1903,7 @@ class MonitorApp:
 
         self._pick_fonts()
         self._build_strip()
-        self.hist = {key: [] for key in ("cpu", "gpu", "down", "up", "mem", "gpu_temp", "total_down", "total_up", "battery", "uptime")}
+        self.hist = {key: [] for key in STRIP_METRICS}
         self.state = {}
         self.clock = ""
 
@@ -2027,8 +2077,12 @@ class MonitorApp:
         if isinstance(old_style, str):
             data["style"] = {"text": "minimal", "pill": "glass"}.get(old_style, old_style)
         for key, choices in STRIP_CHOICES.items():
+            if key == "strip_profile" and data.get(key) == "custom":
+                continue
             if not isinstance(data.get(key), str) or data[key] not in choices:
                 data[key] = STRIP_DEFAULTS[key]
+        data["strip_items"] = selected_strip_items(data)
+        data["strip_profile"] = strip_profile_for_items(data["strip_items"])
         for key, choices, default in (
             ("mode", ("taskbar", "card", "mini", "tray"), "taskbar"),
             ("theme", ("auto", "dark", "light"), "auto"),
@@ -2108,7 +2162,7 @@ class MonitorApp:
         w = self.strip_w
         margin = round(8 * self.scale)
         density = 1.0 if self.cfg["strip_layout"] == "classic" else STRIP_SIZES[self.cfg["strip_size"]][1]
-        content_h = round(STRIP_HEIGHTS[self.cfg["strip_layout"]] * self.scale * density)
+        content_h = round(strip_design_height(self.cfg["strip_layout"], len(selected_strip_items(self.cfg))) * self.scale * density)
         if edge in (1, 3):
             kids = taskbar_children()
             tray = kids.get("TrayNotifyWnd")
@@ -2442,8 +2496,23 @@ class MonitorApp:
         if key not in STRIP_CHOICES or value not in STRIP_CHOICES[key]:
             return
         self.cfg[key] = value
+        if key == "strip_profile":
+            self.cfg["strip_items"] = list(STRIP_PROFILES[value][1])
         if key == "style":
             self.style = value
+        self._apply_strip_settings()
+
+    def set_strip_items(self, items, selected=None):
+        items = clean_strip_items(items)
+        if not items:
+            return False
+        self.cfg.update(strip_items=items, strip_profile=strip_profile_for_items(items))
+        if selected is not None:
+            self._settings_selected_metric = selected
+        self._apply_strip_settings()
+        return True
+
+    def _apply_strip_settings(self):
         self._build_strip()
         if self.mode == "taskbar":
             self.dock_now(force=True)
@@ -2452,21 +2521,36 @@ class MonitorApp:
             self.render_settings()
 
     def refresh_settings_preview(self):
-        label = getattr(self, "_settings_preview_label", None)
-        if label is None or not label.winfo_exists():
+        canvas = getattr(self, "_settings_preview_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
             return
-        scale = min(self.scale, self.work_area()[2] / 480) * STRIP_SIZES[self.cfg["strip_size"]][1]
+        count = len(selected_strip_items(self.cfg))
+        scale = self.scale * STRIP_SIZES[self.cfg["strip_size"]][1]
         if self.cfg["strip_layout"] == "classic":
-            width = self._classic_geometry()["width"]
-            height = round(40 * self.scale) + 2
+            geometry = self._classic_geometry()
+            width, height = geometry["width"], round(geometry["height"] * self.scale) + 2
         else:
-            width = round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * scale)
-            height = round(STRIP_HEIGHTS[self.cfg["strip_layout"]] * scale)
+            width = round(strip_design_width(self.cfg["strip_layout"], count) * scale)
+            height = round(strip_design_height(self.cfg["strip_layout"], count) * scale) + 2
         bg = (235, 240, 248, 255) if self.palette()["light"] else (16, 23, 35, 255)
         image = Image.new("RGBA", (width, height), bg)
         image.alpha_composite(self._compose_strip(width, height))
         self._settings_preview = ImageTk.PhotoImage(image.convert("RGB"), master=self.root)
-        label.configure(image=self._settings_preview, bg=CARD_THEMES[self.card_theme]["bg"])
+        canvas.configure(height=height, scrollregion=(0, 0, width, height))
+        if not canvas.find_withtag("preview"):
+            canvas.create_image(0, 0, image=self._settings_preview, anchor="nw", tags="preview")
+        else:
+            canvas.itemconfigure("preview", image=self._settings_preview)
+        viewport_width = canvas.winfo_width()
+        canvas.coords("preview", max(0, (viewport_width - width) // 2), 0)
+        bar = self._settings_preview_scrollbar
+        if width > viewport_width:
+            if not bar.winfo_manager():
+                bar.pack(fill="x")
+        else:
+            bar.pack_forget()
+            canvas.xview_moveto(0)
+        self._settings_preview_status.configure(text=f"{count} 项 · {width} px")
 
     def set_card_theme(self, name):
         if name not in CARD_THEMES:
@@ -2517,7 +2601,7 @@ class MonitorApp:
             ("gap", "", "", None, 10),
             ("item", "任务栏样式", STRIP_STYLES[self.style], lambda: self.cycle("style"), 36),
             ("item", "展示排版", STRIP_LAYOUTS[self.cfg["strip_layout"]][0], lambda: self.cycle("strip_layout"), 36),
-            ("item", "展示指标", STRIP_PROFILES[self.cfg["strip_profile"]][0], lambda: self.cycle("strip_profile"), 36),
+            ("item", "自由选择指标", f"{len(selected_strip_items(self.cfg))} 项", lambda: self.open_settings("metrics"), 36),
             ("item", "显示模式", mode_name, lambda: self.cycle("mode"), 36),
             ("item", "面板主题", {"dark": "深空", "light": "云白", "minimal": "素纸", "glass": "雾蓝"}[self.card_theme],
              lambda: self.cycle("card_theme"), 36),
@@ -2534,7 +2618,8 @@ class MonitorApp:
         if key in STRIP_CHOICES:
             order = list(STRIP_CHOICES[key])
             current = self.cfg[key]
-            self.set_strip_option(key, order[(order.index(current) + 1) % len(order)])
+            index = order.index(current) if current in order else -1
+            self.set_strip_option(key, order[(index + 1) % len(order)])
         elif key == "mode":
             order = ["taskbar", "card", "mini", "tray"]
             self.set_mode(order[(order.index(self.mode) + 1) % len(order)])
@@ -2727,7 +2812,7 @@ class MonitorApp:
         same_tab = getattr(self, "_settings_rendered_tab", None) == self._settings_tab
         scroll = old_canvas.yview()[0] if same_tab and old_canvas is not None and old_canvas.winfo_exists() else 0
         self._settings_rendered_tab = self._settings_tab
-        self._settings_preview_label = None
+        self._settings_preview_canvas = None
         for widget in win.winfo_children():
             widget.destroy()
         self._settings_vars = []
@@ -2766,18 +2851,30 @@ class MonitorApp:
             self._settings_tab = key
             self.render_settings()
 
-        for i, (key, label) in enumerate((("appearance", "任务栏"), ("panel", "面板"), ("behavior", "行为"), ("about", "关于"))):
+        for i, (key, label) in enumerate((("appearance", "任务栏"), ("metrics", "指标"), ("panel", "面板"), ("behavior", "行为"), ("about", "关于"))):
             navigation.columnconfigure(i, weight=1, uniform="tabs")
             button(navigation, label, lambda k=key: switch_tab(k), self._settings_tab == key).grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else px(6), 0))
 
-        if self._settings_tab == "appearance":
+        style = ttk.Style(win)
+        style.theme_use("clam")
+        if self._settings_tab in ("appearance", "metrics"):
             live = tk.Frame(win, bg=p["bg"], padx=px(4), pady=px(3))
             live.pack(fill="x", padx=px(14), pady=(0, px(8)))
             top = tk.Frame(live, bg=p["bg"])
             top.pack(fill="x")
             tk.Label(top, text="实际大小预览", bg=p["bg"], fg=p["dim"], font=font(11, True)).pack(side="left")
-            self._settings_preview_label = tk.Label(live, bg=p["surface"], bd=0)
-            self._settings_preview_label.pack(anchor="center", pady=(px(3), 0))
+            self._settings_preview_status = tk.Label(top, bg=p["bg"], fg=p["faint"], font=font(10))
+            self._settings_preview_status.pack(side="right")
+            self._settings_preview_canvas = tk.Canvas(live, bg=p["bg"], width=1, highlightthickness=0, bd=0)
+            self._settings_preview_canvas.pack(fill="x", pady=(px(3), 0))
+            style.layout("Monitor.Horizontal.TScrollbar", [("Horizontal.Scrollbar.trough", {
+                "children": [("Horizontal.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})], "sticky": "ew"})])
+            style.configure("Monitor.Horizontal.TScrollbar", background=p["track"], troughcolor=p["bg"],
+                            bordercolor=p["bg"], lightcolor=p["track"], darkcolor=p["track"], width=px(7), arrowsize=0)
+            self._settings_preview_scrollbar = ttk.Scrollbar(live, orient="horizontal",
+                command=self._settings_preview_canvas.xview, style="Monitor.Horizontal.TScrollbar")
+            self._settings_preview_canvas.configure(xscrollcommand=self._settings_preview_scrollbar.set)
+            self._settings_preview_canvas.bind("<Configure>", lambda e: self.refresh_settings_preview())
             self.refresh_settings_preview()
 
         footer = tk.Frame(win, bg=p["bg"], padx=px(14), pady=px(8))
@@ -2789,8 +2886,6 @@ class MonitorApp:
         viewport.pack(fill="both", expand=True)
         canvas = tk.Canvas(viewport, highlightthickness=0, bd=0, bg=p["bg"])
         self._settings_canvas = canvas
-        style = ttk.Style(win)
-        style.theme_use("clam")
         style.layout("Monitor.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {
             "children": [("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})], "sticky": "ns"})])
         style.configure("Monitor.Vertical.TScrollbar", background=p["track"], troughcolor=p["bg"],
@@ -2803,7 +2898,7 @@ class MonitorApp:
         item = canvas.create_window(0, 0, window=content, anchor="nw")
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=e.width))
         content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-int(e.delta / 120), "units") if canvas.winfo_height() < content.winfo_height() and not isinstance(e.widget, tk.Scale) else None)
+        win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-int(e.delta / 120), "units") if canvas.winfo_height() < content.winfo_height() and not isinstance(e.widget, (tk.Scale, tk.Listbox)) else None)
 
         def section(title, subtitle=""):
             frame = tk.Frame(content, bg=p["surface"], padx=px(10), pady=px(7),
@@ -2879,9 +2974,8 @@ class MonitorApp:
                 control.grid(row=index // 3, column=index % 3, sticky="ew", padx=px(2), pady=px(2))
             segments("展示排版", [(key, item[0]) for key, item in STRIP_LAYOUTS.items()], self.cfg["strip_layout"],
                      lambda value: self.set_strip_option("strip_layout", value))
-            segments("展示指标", [(key, item[0]) for key, item in STRIP_PROFILES.items()], self.cfg["strip_profile"],
-                     lambda value: self.set_strip_option("strip_profile", value),
-                     STRIP_PROFILE_HINTS[self.cfg["strip_profile"]])
+            frame = section("显示内容", f"已选 {len(selected_strip_items(self.cfg))} 项，可逐项勾选并调整顺序。")
+            button(frame, "自由选择指标 →", lambda: switch_tab("metrics")).pack(anchor="w", pady=(px(5), 0))
             segments("强调色", list(STRIP_ACCENTS.items()), self.cfg["strip_accent"],
                      lambda value: self.set_strip_option("strip_accent", value))
             classic = self.cfg["strip_layout"] == "classic"
@@ -2896,6 +2990,76 @@ class MonitorApp:
                 self.draw()
                 self.refresh_settings_preview()
             toggle("负载刻度", "在双行和横排底部显示占用刻度，让变化一眼可见。", self.cfg["strip_indicators"], indicators)
+        elif self._settings_tab == "metrics":
+            items = selected_strip_items(self.cfg)
+            profile = self.cfg["strip_profile"]
+            segments("快捷组合" + (" · 当前自选" if profile == "custom" else ""),
+                     [(key, item[0]) for key, item in STRIP_PROFILES.items()], profile,
+                     lambda value: self.set_strip_option("strip_profile", value))
+            frame = section("选择显示内容", "至少保留一项。减少项目会收起空位，增加项目会扩展宽度。")
+            grid = tk.Frame(frame, bg=p["surface"])
+            grid.pack(fill="x", pady=(px(5), 0))
+            self._settings_metric_checks = {}
+            for index, (key, (name, _)) in enumerate(STRIP_METRICS.items()):
+                var = tk.BooleanVar(value=key in items)
+                self._settings_vars.append(var)
+                def changed(metric=key, variable=var):
+                    current = selected_strip_items(self.cfg)
+                    values = current + [metric] if variable.get() else [value for value in current if value != metric]
+                    if not self.set_strip_items(values, metric if variable.get() else None):
+                        variable.set(True)
+                        self._settings_status.configure(text="至少保留一项显示内容", fg=p["amber"])
+                control = tk.Checkbutton(grid, text=name, variable=var, command=changed,
+                    font=font(12), bg=p["surface"], fg=p["text"], activebackground=p["track"],
+                    activeforeground=p["text"], selectcolor=p["track"], bd=0, highlightthickness=0,
+                    cursor="hand2", anchor="w", padx=px(2), pady=px(4), takefocus=True)
+                column = index % 2
+                grid.columnconfigure(column, weight=1, uniform="metrics")
+                control.grid(row=index // 2, column=column, sticky="ew")
+                self._settings_metric_checks[key] = control
+            frame = section("显示顺序", "双行排版从上到下、再从左到右；横向排版从左到右。")
+            row = tk.Frame(frame, bg=p["surface"])
+            row.pack(fill="x", pady=(px(5), 0))
+            order = tk.Listbox(row, height=min(4, len(items)), font=font(12), bg=p["bg"], fg=p["text"],
+                selectbackground=p["track"], selectforeground=p["teal"], activestyle="none",
+                exportselection=False, bd=0, highlightthickness=1, highlightbackground=p["border"])
+            order.pack(side="left", fill="x", expand=True)
+            self._settings_metric_order = order
+            for index, key in enumerate(items):
+                order.insert("end", f" {index + 1}.  {STRIP_METRICS[key][0]}")
+            selected = getattr(self, "_settings_selected_metric", None)
+            selected_index = items.index(selected) if selected in items else 0
+            order.selection_set(selected_index)
+            order.activate(selected_index)
+            order.see(selected_index)
+            controls = tk.Frame(row, bg=p["surface"])
+            controls.pack(side="right", padx=(px(8), 0))
+            def move(delta):
+                selection = order.curselection()
+                if not selection:
+                    return
+                index = selection[0]
+                target = index + delta
+                if 0 <= target < len(items):
+                    values = list(items)
+                    values[index], values[target] = values[target], values[index]
+                    self.set_strip_items(values, items[index])
+            up = button(controls, "上移 ↑", lambda: move(-1))
+            up.pack(fill="x", pady=(0, px(5)))
+            down = button(controls, "下移 ↓", lambda: move(1))
+            down.pack(fill="x")
+            def select_order(event=None):
+                selection = order.curselection()
+                if selection:
+                    index = selection[0]
+                    self._settings_selected_metric = items[index]
+                    up.configure(state="normal" if index else "disabled")
+                    down.configure(state="normal" if index < len(items) - 1 else "disabled")
+            order.bind("<<ListboxSelect>>", select_order)
+            order.bind("<Alt-Up>", lambda e: move(-1) or "break")
+            order.bind("<Alt-Down>", lambda e: move(1) or "break")
+            select_order()
+            section("传感器说明", "显卡、温度或电池不可用时显示 —。显存和系统盘显示已用百分比；累计流量从本次启动起统计。CPU 温度可能来自 ACPI 热区，仅作参考。")
         elif self._settings_tab == "panel":
             segments("显示模式", [("taskbar", "任务栏条"), ("card", "悬浮卡片"), ("mini", "紧凑条"), ("tray", "仅托盘")], self.mode, self.set_mode)
             segments("面板主题", [("dark", "深空"), ("light", "云白"), ("minimal", "素纸"), ("glass", "雾蓝")], self.card_theme, self.set_card_theme,
@@ -3105,20 +3269,9 @@ class MonitorApp:
             self.draw_card()
 
     def push_history(self):
-        st = self.state
-        for key, val in (
-            ("cpu", st.get("cpu")),
-            ("gpu", (st.get("gpu") or {}).get("util")),
-            ("mem", st.get("mem_pct")),
-            ("down", st.get("down")),
-            ("up", st.get("up")),
-            ("gpu_temp", (st.get("gpu") or {}).get("temp")),
-            ("total_down", st.get("total_down")),
-            ("total_up", st.get("total_up")),
-            ("battery", (st.get("battery") or {}).get("pct")),
-            ("uptime", st.get("uptime")),
-        ):
-            h = self.hist[key]
+        for metric in strip_metrics(self.state, items=list(STRIP_METRICS)):
+            h = self.hist[metric["key"]]
+            val = metric["raw"]
             h.append(float(val) if val is not None else 0.0)
             if len(h) > self.SPARK_N:
                 del h[: len(h) - self.SPARK_N]
@@ -3184,7 +3337,7 @@ class MonitorApp:
         if self.cfg["strip_layout"] == "classic":
             self.strip_w = self._classic_geometry()["width"]
         else:
-            self.strip_w = round(STRIP_LAYOUTS[self.cfg["strip_layout"]][1] * self.scale * density)
+            self.strip_w = round(strip_design_width(self.cfg["strip_layout"], len(selected_strip_items(self.cfg))) * self.scale * density)
         self._strip_key = None
         self._img_item = None
 
@@ -3195,11 +3348,9 @@ class MonitorApp:
         label_px, value_px = max(8, round(8.6 * scale)), max(10, round(12.8 * scale))
         label_font = self._font("segoeui.ttf", label_px)
         value_font = self._font("seguisb.ttf", value_px)
-        profile = options.get("strip_profile", self.cfg["strip_profile"])
-        metrics = strip_metrics(getattr(self, "state", {}), profile)
-        if profile == "balanced":
-            metrics = [metrics[0], metrics[1], metrics[3], metrics[2]]
-        labels = {"cpu": "CPU", "mem": "RAM", "gpu": "GPU", "gpu_temp": "TEMP",
+        metrics = strip_metrics(getattr(self, "state", {}), items=selected_strip_items(self.cfg, **options))
+        labels = {"cpu": "CPU", "mem": "RAM", "gpu": "GPU", "vram": "VRAM", "disk": "DISK",
+                  "cpu_temp": "CPU°", "gpu_temp": "GPU°",
                   "battery": "BAT", "uptime": "ON", "up": "↑", "down": "↓",
                   "total_down": "Σ↓", "total_up": "Σ↑"}
         records = []
@@ -3214,26 +3365,28 @@ class MonitorApp:
         column_gap = 12 * scale * spacing
         columns = []
         x = pad
-        for pair in (records[:2], records[2:]):
+        for offset in range(0, len(records), 2):
+            pair = records[offset:offset + 2]
             label_width = max((value_font if m["rate"] else label_font).getlength(m["tag"]) for m in pair)
             number_width = max(value_font.getlength(m["reserve"]) for m in pair)
             # No automatic font shrinking when a reading needs more room.
             number_width = max(number_width, *(value_font.getlength(m["value"]) for m in pair))
-            unit_width = max(label_font.getlength(m["unit"] or ("%" if m["key"] in ("cpu", "mem", "gpu", "battery")
-                                   else ("°C" if m["key"] == "gpu_temp" else ("GB" if m["key"].startswith("total_") else "")))) for m in pair)
+            unit_width = max(label_font.getlength(m["unit"] or ("%" if m["key"] in ("cpu", "mem", "gpu", "vram", "disk", "battery")
+                                   else ("°C" if m["key"] in ("cpu_temp", "gpu_temp") else ("GB" if m["key"].startswith("total_") else "")))) for m in pair)
             number_x = x + label_width + gap
             end = number_x + number_width
             width = label_width + gap + number_width + (unit_gap + unit_width if unit_width else 0)
-            columns.append(dict(label=x, number=number_x, end=end, unit=end + unit_gap, width=width))
+            columns.append(dict(label=x, number=number_x, end=end, unit=end + unit_gap, width=width, count=len(pair)))
             x += width + column_gap
         return dict(width=round(x - column_gap + pad), label_px=label_px, value_px=value_px,
-                    columns=columns, records=records, separator=columns[0]["label"] + columns[0]["width"] + column_gap / 2)
+                    columns=columns, records=records, height=strip_design_height("classic", len(records)),
+                    separators=[c["label"] + c["width"] + column_gap / 2 for c in columns[:-1]])
 
     def _compose_classic(self, W, H, **options):
         geometry = self._classic_geometry(**options)
         painter = StripPainter(self, W, H, **options)
         painter.dw, painter.scale, painter.k = W / self.scale, self.scale, self.scale * 3
-        painter.ox, painter.oy = 0, (H - 40 * self.scale) / 2
+        painter.ox, painter.oy = 0, (H - geometry["height"] * self.scale) / 2
         painter.background()
         image, draw = painter.image, painter.d
         palette = self.palette()
@@ -3241,12 +3394,12 @@ class MonitorApp:
         dim = (77, 83, 92) if palette["light"] else (170, 180, 194)
         label = self._font("segoeui.ttf", geometry["label_px"] * 3)
         value_font = self._font("seguisb.ttf", geometry["value_px"] * 3)
-        draw.line([(geometry["separator"] * 3, H * .24 * 3),
-                   (geometry["separator"] * 3, H * .76 * 3)],
-                  fill=(*ink, 22), width=max(1, round(self.scale)))
+        for separator in geometry["separators"]:
+            draw.line([(separator * 3, H * .24 * 3), (separator * 3, H * .76 * 3)],
+                      fill=(*ink, 22), width=max(1, round(self.scale)))
         for index, metric in enumerate(geometry["records"]):
             column = geometry["columns"][index // 2]
-            y = H * (.32 if index % 2 == 0 else .68) * 3
+            y = H * (.5 if column["count"] == 1 else (.32 if index % 2 == 0 else .68)) * 3
             tag_color = palette["blue"] if metric["key"] == "up" else (palette["teal"] if metric["key"] == "down" else dim)
             draw.text((column["label"] * 3, y), metric["tag"], font=value_font if metric["rate"] else label,
                       fill=tag_color, anchor="lm")
@@ -3525,7 +3678,9 @@ def main():
     except Exception:
         pass
     app = MonitorApp()
-    if "--settings" in sys.argv:
+    if "--metrics" in sys.argv:
+        app.root.after(350, lambda: app.open_settings("metrics"))
+    elif "--settings" in sys.argv:
         app.root.after(350, app.open_settings)
     app.root.mainloop()
 

@@ -159,8 +159,78 @@ class TaskbarPreferencesTests(unittest.TestCase):
             self.assertEqual(cfg[key], default)
         self.assertTrue(cfg["strip_indicators"])
 
+    def test_old_presets_migrate_to_editable_items(self):
+        for profile, (_, items) in mon.STRIP_PROFILES.items():
+            cfg = self.load(json.dumps({"strip_profile": profile, "strip_size": "large"}))
+            self.assertEqual(cfg["strip_items"], list(items))
+            self.assertEqual(cfg["strip_profile"], profile)
+            self.assertEqual(cfg["strip_size"], "large")
+
+    def test_custom_order_survives_loading_and_round_trip(self):
+        cfg = self.load(json.dumps({"strip_profile": "custom", "strip_items": ["down", "vram", "cpu_temp"]}))
+        self.assertEqual(cfg["strip_profile"], "custom")
+        self.assertEqual(cfg["strip_items"], ["down", "vram", "cpu_temp"])
+        self.assertEqual(self.load(json.dumps(cfg))["strip_items"], cfg["strip_items"])
+
+    def test_duplicate_unknown_and_malformed_items_are_removed(self):
+        cfg = self.load(json.dumps({"strip_items": ["gpu", "bogus", "gpu", {}, None, "disk"]}))
+        self.assertEqual(cfg["strip_items"], ["gpu", "disk"])
+        self.assertEqual(cfg["strip_profile"], "custom")
+        for value in ([], None, "cpu", {"cpu": True}, ["bogus"]):
+            cfg = self.load(json.dumps({"strip_profile": "network", "strip_items": value}))
+            self.assertEqual(cfg["strip_items"], list(mon.STRIP_PROFILES["network"][1]))
+
+    def test_items_take_precedence_over_a_stale_preset(self):
+        cfg = self.load(json.dumps({"strip_profile": "hardware", "strip_items": ["cpu"]}))
+        self.assertEqual((cfg["strip_profile"], cfg["strip_items"]), ("custom", ["cpu"]))
+
 
 class TaskbarMeasurementsTests(unittest.TestCase):
+    def test_custom_metrics_use_the_requested_order_and_existing_readings(self):
+        state = {"gpu": {"mem_used": 2048, "mem_total": 8192}, "cpu_temp": 65,
+                 "disk_total": 1000, "disk_free": 400, "cpu": 0}
+        keys = ["disk", "cpu_temp", "vram", "cpu"]
+        metrics = mon.strip_metrics(state, items=keys)
+        self.assertEqual([m["key"] for m in metrics], keys)
+        self.assertEqual([(m["value"], m["unit"]) for m in metrics], [("60", "%"), ("65", "°C"), ("25", "%"), ("0", "%")])
+
+    def test_unavailable_or_nonfinite_new_sensors_show_placeholder(self):
+        state = {"cpu_temp": float("nan"), "gpu": {"mem_used": 1, "mem_total": 0}, "disk_total": 0, "disk_free": 0}
+        metrics = mon.strip_metrics(state, items=["cpu_temp", "vram", "disk"])
+        self.assertTrue(all(m["value"] == "—" and m["level"] is None for m in metrics))
+
+    def test_explicit_profile_preview_ignores_custom_selection(self):
+        cfg = {"strip_profile": "custom", "strip_items": ["cpu"]}
+        self.assertEqual(mon.selected_strip_items(cfg, strip_profile="network"), list(mon.STRIP_PROFILES["network"][1]))
+
+    def test_classic_any_item_count_preserves_fonts_and_removes_empty_columns(self):
+        app = mon.MonitorApp.__new__(mon.MonitorApp)
+        app.scale, app._font_cache, app.state = 1.5, {}, {}
+        app.cfg = {**mon.STRIP_DEFAULTS}
+        widths = []
+        for count in (1, 3, 6, len(mon.STRIP_METRICS)):
+            items = list(mon.STRIP_METRICS)[:count]
+            app.cfg["strip_items"] = items
+            geometry = app._classic_geometry()
+            self.assertEqual((geometry["label_px"], geometry["value_px"]), (13, 19))
+            self.assertEqual([m["key"] for m in geometry["records"]], items)
+            self.assertEqual(len(geometry["columns"]), (count + 1) // 2)
+            self.assertEqual(len(geometry["separators"]), len(geometry["columns"]) - 1)
+            self.assertEqual(sum(c["count"] for c in geometry["columns"]), count)
+            self.assertEqual(geometry["height"], 24 if count == 1 else 40)
+            widths.append(geometry["width"])
+        self.assertEqual(widths, sorted(set(widths)))
+
+    def test_layout_cells_do_not_shrink_when_more_metrics_are_selected(self):
+        for layout in ("micro", "duo", "inline", "gauges", "trends"):
+            reference = 2 if layout in ("micro", "duo") else 4
+            gap = 2 if layout == "micro" else (5 if layout == "duo" else 0)
+            expected = (mon.STRIP_LAYOUTS[layout][1] - 4 - gap * (reference - 1)) / reference
+            for count in (1, 3, 6, 13):
+                columns = (count + 1) // 2 if reference == 2 else count
+                cell = (mon.strip_design_width(layout, count) - 4 - gap * (columns - 1)) / columns
+                self.assertAlmostEqual(cell, expected)
+
     def test_zero_gpu_and_empty_battery_are_not_missing(self):
         state = {"cpu": 0, "mem_pct": 0, "gpu": {"util": 0, "temp": None}, "battery": {"pct": 0}}
         hardware = mon.strip_metrics(state, "hardware")

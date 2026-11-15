@@ -64,10 +64,51 @@ def main():
                 timers = app.root.tk.splitlist(app.root.tk.call("after", "info"))
                 assert len([t for t in timers if "_popup_watch" in str(app.root.tk.call("after", "info", t))]) == 1
                 app.hide_detail()
-            for tab in ("appearance", "panel", "behavior", "about"):
+            for tab in ("appearance", "metrics", "panel", "behavior", "about"):
                 app.open_settings(tab)
                 pump()
                 assert app._set_win.winfo_exists()
+            app._close_settings()
+            # Arbitrary selection must resize every style without compressing its cells.
+            for count in (1, 3, 6, len(mon.STRIP_METRICS)):
+                items = list(mon.STRIP_METRICS)[:count]
+                assert app.set_strip_items(items)
+                for layout in mon.STRIP_LAYOUTS:
+                    app.set_strip_option("strip_layout", layout)
+                    for style in mon.STRIP_STYLES:
+                        app.set_style(style)
+                        assert app.strip.w == app.strip_w
+                        painter = mon.StripPainter(app, app.strip_w, app.strip.h)
+                        assert [m["key"] for m in painter.metrics] == items
+                        image = app._compose_strip(app.strip_w, app.strip.h)
+                        assert image.size == (app.strip_w, app.strip.h)
+                saved = json.loads(Path(mon.CFG_PATH).read_text(encoding="utf-8"))
+                assert mon.MonitorApp.load_cfg(app)["strip_items"] == saved["strip_items"] == items
+            app.set_strip_option("strip_layout", "classic")
+            app.set_style("minimal")
+            app.open_settings("metrics")
+            pump()
+            assert app._settings_preview.width() == app.strip_w
+            app._settings_preview_canvas.xview_moveto(1)
+            assert app._settings_preview_canvas.xview()[0] > 0
+            assert app.set_strip_items(["cpu"])
+            pump()
+            app._settings_metric_checks["cpu"].invoke()
+            pump()
+            assert app.cfg["strip_items"] == ["cpu"], "Last metric must remain selected"
+            app._settings_metric_checks["down"].invoke()
+            pump()
+            assert app.cfg["strip_items"] == ["cpu", "down"]
+            assert app._settings_preview.width() == app.strip_w
+            order = app._settings_metric_order
+            order.focus_force()
+            order.event_generate("<Alt-Up>")
+            pump()
+            assert app.cfg["strip_items"] == ["down", "cpu"]
+            app.set_strip_option("strip_accent", "blue")
+            assert app.cfg["strip_items"] == ["down", "cpu"]
+            app.set_strip_option("strip_profile", "balanced")
+            assert app.cfg["strip_items"] == ["cpu", "mem", "up", "down"]
             app._close_settings()
             # Layout changes must resize the native strip while preserving docking and preferences.
             app.set_mode("taskbar")
@@ -147,7 +188,7 @@ def main():
             assert not failures, failures
             error_log = Path(folder) / "error.log"
             assert not error_log.exists(), error_log.read_text(encoding="utf-8") if error_log.exists() else ""
-            print("UI SELFTEST OK: modes, themes, settings, timers, fullscreen, edges, GDI resources", flush=True)
+            print("UI SELFTEST OK: modes, themes, metric selection/order/persistence, all layouts/styles, settings, timers, fullscreen, edges, GDI resources", flush=True)
         finally:
             app.quit()
 
