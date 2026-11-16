@@ -8,7 +8,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 if sys.platform != "win32":
     raise unittest.SkipTest("Desktop Monitor uses Windows APIs")
@@ -65,6 +65,127 @@ class NativeBufferTests(unittest.TestCase):
             strip.update(None, -100, 20)
         allocate.assert_not_called()
         self.assertEqual(move.call_args.args[2:4], (-100, 20))
+
+
+class TaskbarInteractionTests(unittest.TestCase):
+    def test_choice_menu_entries_open_settings_instead_of_cycling_values(self):
+        app = mon.MonitorApp.__new__(mon.MonitorApp)
+        app.mode, app.style, app.card_theme = "taskbar", "glass", "dark"
+        app.popup = app.locked = False
+        app.cfg = {**mon.STRIP_DEFAULTS, "style": "glass", "strip_items": ["cpu", "mem", "up", "down"]}
+        app.open_settings, app.cycle = Mock(), Mock()
+        rows = {row[1]: row for row in app.menu_rows()}
+        for label, tab in (("任务栏样式", "appearance"), ("展示排版", "appearance"),
+                           ("自由选择指标", "metrics"), ("显示模式", "panel"), ("面板主题", "panel")):
+            with self.subTest(label=label):
+                app.open_settings.reset_mock()
+                rows[label][3]()
+                app.open_settings.assert_called_once_with(tab)
+        app.cycle.assert_not_called()
+        self.assertEqual((app.style, app.cfg["strip_layout"]), ("glass", "classic"))
+
+    def popup(self):
+        app = mon.MonitorApp.__new__(mon.MonitorApp)
+        app.root, app.hide_detail = Mock(), Mock()
+        app._popup_win, app._closing, app._mouse_down = True, False, False
+        app._inside_popup = Mock(return_value=False)
+        app._inside_launcher = Mock(return_value=False)
+        app._owns_foreground = Mock(return_value=True)
+        return app
+
+    def test_completed_click_cannot_dismiss_new_popup(self):
+        app = self.popup()
+        with patch.object(mon._u32, "GetAsyncKeyState", return_value=1):
+            app._popup_watch()
+        app.hide_detail.assert_not_called()
+        app.root.after.assert_called_once()
+
+    def test_new_outside_press_dismisses_popup(self):
+        app = self.popup()
+        with patch.object(mon._u32, "GetAsyncKeyState", return_value=0x8000):
+            app._popup_watch()
+        app.hide_detail.assert_called_once()
+        app.root.after.assert_not_called()
+
+    def test_completed_click_cannot_dismiss_new_menu(self):
+        app = mon.MonitorApp.__new__(mon.MonitorApp)
+        app.root, app.close_menu, app._menu_win = Mock(), Mock(), Mock()
+        app._closing, app._menu_mouse_down = False, False
+        app._menu_rect, app._menu_ts = (-100, -100, 1, 1), 0
+        app._owns_foreground = Mock(return_value=True)
+        with patch.object(mon._u32, "GetAsyncKeyState", return_value=1):
+            app._menu_watch()
+        app.close_menu.assert_not_called()
+
+    def test_fast_outside_click_is_dismissed_on_focus_change(self):
+        app = self.popup()
+        app._popup_focus_owned = True
+        app._owns_foreground.return_value = False
+        with patch.object(mon._u32, "GetAsyncKeyState", return_value=0):
+            app._popup_watch()
+        app.hide_detail.assert_called_once()
+
+    def test_tray_click_waits_for_toggle_instead_of_dismissing_on_mouse_down(self):
+        app = self.popup()
+        app._popup_focus_owned = True
+        app._owns_foreground.return_value = False
+        app._inside_popup.return_value = app._inside_launcher.return_value = True
+        with patch.object(mon._u32, "GetAsyncKeyState", return_value=0x8000):
+            app._popup_watch()
+        app.hide_detail.assert_not_called()
+
+    def test_launcher_bounds_include_the_tray_icon(self):
+        app = mon.MonitorApp.__new__(mon.MonitorApp)
+        app.mode, app._tb_rect = "tray", None
+        app.tray = SimpleNamespace(rect=lambda: (100, 200, 24, 24))
+        self.assertTrue(app._inside_launcher(110, 210))
+        self.assertFalse(app._inside_launcher(99, 210))
+
+    def test_strip_show_never_activates_and_is_idempotent(self):
+        strip = mon.LayeredStrip(SimpleNamespace())
+        strip.hwnd = 99
+        with patch.object(mon._u32, "IsWindowVisible", return_value=False), \
+             patch.object(mon._u32, "ShowWindow") as show:
+            strip.show()
+        show.assert_called_once_with(99, 8)  # SW_SHOWNA
+        with patch.object(mon._u32, "IsWindowVisible", return_value=True), \
+             patch.object(mon._u32, "ShowWindow") as show:
+            strip.show()
+        show.assert_not_called()
+
+    def test_strip_does_not_reorder_itself_when_already_on_top(self):
+        strip = mon.LayeredStrip(SimpleNamespace())
+        strip.hwnd, strip.x, strip.y, strip.w, strip.h = 99, 10, 20, 200, 40
+        with patch.object(mon._u32, "IsWindowVisible", return_value=True), \
+             patch.object(mon._u32, "WindowFromPoint", return_value=99), \
+             patch.object(mon, "taskbar_hwnd", return_value=88), \
+             patch.object(mon._u32, "IsChild", return_value=False), \
+             patch.object(mon._u32, "SetWindowPos") as move:
+            strip.raise_top()
+        move.assert_not_called()
+
+    def test_strip_recovers_only_when_covered_by_the_taskbar(self):
+        strip = mon.LayeredStrip(SimpleNamespace())
+        strip.hwnd, strip.x, strip.y, strip.w, strip.h = 99, 10, 20, 200, 40
+        for covering, expected in ((88, 1), (77, 0)):
+            with patch.object(mon._u32, "IsWindowVisible", return_value=True), \
+                 patch.object(mon._u32, "WindowFromPoint", return_value=covering), \
+                 patch.object(mon, "taskbar_hwnd", return_value=88), \
+                 patch.object(mon._u32, "IsChild", return_value=False), \
+                 patch.object(mon._u32, "SetWindowPos") as move:
+                strip.raise_top()
+                self.assertEqual(move.call_count, expected)
+
+    def test_popup_is_drawn_before_becoming_visible(self):
+        app = self.popup()
+        app._popup_after, app.card_win = None, Mock()
+        app._ensure_card_win, app.layout_popup, app.apply_card_alpha = Mock(), Mock(), Mock()
+        events = []
+        app.draw_card = lambda: events.append("draw")
+        app.card_win.deiconify.side_effect = lambda: events.append("show")
+        with patch.object(mon._u32, "GetAsyncKeyState", return_value=0):
+            app.show_popup()
+        self.assertEqual(events, ["draw", "show"])
 
 
 class NetworkTests(unittest.TestCase):

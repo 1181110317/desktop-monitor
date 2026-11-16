@@ -33,7 +33,7 @@ from contextlib import contextmanager
 import math
 
 APP_NAME = "桌面性能监视器"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 RESOURCES = getattr(sys, "_MEIPASS", BASE)
 DATA_DIR = (os.path.join(os.environ.get("LOCALAPPDATA", BASE), "DesktopMonitor")
@@ -1032,6 +1032,24 @@ class TrayIcon:
             # 资源管理器重启后把图标补回去
             self.app.ui_call("readd_icon")
 
+    def rect(self):
+        if not self.ok or not self.hwnd:
+            return None
+        class NOTIFYICONIDENTIFIER(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uID", wt.UINT), ("guidItem", GUID)]
+        identifier = NOTIFYICONIDENTIFIER()
+        identifier.cbSize, identifier.hWnd, identifier.uID = ctypes.sizeof(identifier), self.hwnd, 1
+        rect = wt.RECT()
+        try:
+            get_rect = _shell32.Shell_NotifyIconGetRect
+            get_rect.argtypes = [ctypes.POINTER(NOTIFYICONIDENTIFIER), ctypes.POINTER(wt.RECT)]
+            get_rect.restype = ctypes.c_long
+            if get_rect(ctypes.byref(identifier), ctypes.byref(rect)) == 0:
+                return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+        except (AttributeError, OSError):
+            pass
+        return None
+
     def remove(self):
         try:
             nid = self._nid()
@@ -1383,11 +1401,15 @@ class ProcReader(threading.Thread):
 
 class LayeredStrip:
     WM_NCHITTEST = 0x0084
+    WM_MOUSEACTIVATE = 0x0021
+    WM_LBUTTONDOWN = 0x0201
     WM_LBUTTONUP = 0x0202
+    WM_RBUTTONDOWN = 0x0204
     WM_RBUTTONUP = 0x0205
     WM_PAINT = 0x000F
     WM_ERASEBKGND = 0x0014
     HTCLIENT = 1
+    MA_NOACTIVATE = 3
 
     def __init__(self, app, title="DshStrip"):
         self.app = app
@@ -1398,6 +1420,7 @@ class LayeredStrip:
         self.x = self.y = 0
         self.w = self.h = 0
         self._hovered = False
+        self._pressed_button = None
 
     # ---------------- 创建
     def create(self, x, y, w, h):
@@ -1414,6 +1437,8 @@ class LayeredStrip:
             try:
                 if msg == self.WM_NCHITTEST:
                     return self.HTCLIENT
+                if msg == self.WM_MOUSEACTIVATE:
+                    return self.MA_NOACTIVATE
                 if msg == 0x0200 and not self._hovered:  # WM_MOUSEMOVE
                     self._hovered = True
                     self.app.ui_call("strip_enter")
@@ -1425,6 +1450,7 @@ class LayeredStrip:
                     return 0
                 if msg == 0x02A3:  # WM_MOUSELEAVE
                     self._hovered = False
+                    self._pressed_button = None
                     self.app.ui_call("strip_leave")
                     return 0
                 if msg == self.WM_PAINT:
@@ -1432,12 +1458,15 @@ class LayeredStrip:
                     return 0
                 if msg == self.WM_ERASEBKGND:
                     return 1
-                if msg == self.WM_LBUTTONUP:
-                    # 注意：WndProc 里绝对不能调 Tk（会重入 Tcl 直接崩进程），只投递任务
-                    self.app.ui_call("toggle")
+                if msg in (self.WM_LBUTTONDOWN, self.WM_RBUTTONDOWN):
+                    self._pressed_button = msg
                     return 0
-                if msg == self.WM_RBUTTONUP:
-                    self.app.ui_call("menu")
+                if msg in (self.WM_LBUTTONUP, self.WM_RBUTTONUP):
+                    expected = self.WM_LBUTTONDOWN if msg == self.WM_LBUTTONUP else self.WM_RBUTTONDOWN
+                    pressed, self._pressed_button = self._pressed_button, None
+                    if pressed == expected:
+                        # Never enter Tk from WndProc; ignore releases that began outside the strip.
+                        self.app.ui_call("toggle" if msg == self.WM_LBUTTONUP else "menu")
                     return 0
             except Exception:
                 pass
@@ -1482,7 +1511,7 @@ class LayeredStrip:
         u.CreateWindowExW.restype = wt.HWND
         u.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
         self.hwnd = u.CreateWindowExW(EX, self.title, "monitor-strip",
-                                      0x80000000 | 0x10000000,   # WS_POPUP | WS_VISIBLE
+                                      0x80000000,   # Paint the WS_POPUP before showing it.
                                       x, y, w, h, None, None, self._hinst, None)
         self.x, self.y, self.w, self.h = x, y, w, h
         if os.environ.get("DM_DEBUG"):
@@ -1518,20 +1547,26 @@ class LayeredStrip:
 
     # ---------------- 其它
     def hide(self):
-        if self.hwnd:
+        if self.hwnd and _u32.IsWindowVisible(self.hwnd):
             _u32.ShowWindow(self.hwnd, 0)
 
     def show(self):
-        if self.hwnd:
-            _u32.ShowWindow(self.hwnd, 5)
+        if self.hwnd and not _u32.IsWindowVisible(self.hwnd):
+            _u32.ShowWindow(self.hwnd, 8)  # SW_SHOWNA: keep the user's foreground window.
 
     def raise_top(self):
-        if not self.hwnd:
+        if not self.hwnd or not _u32.IsWindowVisible(self.hwnd):
             return
-        u = ctypes.windll.user32
-        u.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
-                                   ctypes.c_int, ctypes.c_int, wt.UINT]
-        u.SetWindowPos(self.hwnd, wt.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        taskbar = taskbar_hwnd()
+        if not taskbar:
+            return
+        # Recover from Explorer covering the strip, without competing with menus or other popups.
+        for fraction in (.5, .2, .8):
+            under = _u32.WindowFromPoint(wt.POINT(self.x + round(self.w * fraction), self.y + self.h // 2))
+            if under and (under == taskbar or _u32.IsChild(taskbar, under)):
+                _u32.SetWindowPos(self.hwnd, wt.HWND(-1), 0, 0, 0, 0,
+                                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+                return
 
     def destroy(self):
         try:
@@ -1882,6 +1917,7 @@ class MonitorApp:
         self.card_canvas = None
         self._popup_win = False
         self._mouse_down = False
+        self._menu_mouse_down = False
         self.card_theme = self.cfg.get("card_theme", "dark")
         self.style = self.cfg["style"]
         self._strip_hover = False
@@ -2191,12 +2227,13 @@ class MonitorApp:
             if changed:
                 color = self.bar_color()
                 self.tb_light = sum(a * b for a, b in zip(color, (0.299, 0.587, 0.114))) > 140
-            self.root.withdraw()
+            if self.root.state() != "withdrawn":
+                self.root.withdraw()
             if changed or force:
                 self.strip.update(self._compose_strip(w, h), x, y)
             self.strip.show()
             self.strip.raise_top()
-            if self._popup_win:
+            if self._popup_win and changed:
                 self.layout_popup()
             return True
         except Exception:
@@ -2206,7 +2243,7 @@ class MonitorApp:
 
 
     def _raise_above_taskbar(self):
-        """分层窗口每两秒无条件抬一次（幂等、开销极小）；其它模式仍用命中点判断。"""
+        """Recover a covered taskbar strip without repeatedly reordering visible windows."""
         try:
             u = _u32
             if self.strip is not None and self.strip.hwnd:
@@ -2239,8 +2276,8 @@ class MonitorApp:
         self.root.after(1200, self.dock_loop)
 
     def top_loop(self):
-        """点任务栏会把它顶到我们上面，这里高频地把窗口抬回来。"""
-        if self.mode == "taskbar":
+        """Check for Explorer occlusion while leaving open menus and settings undisturbed."""
+        if self.mode == "taskbar" and not self._fs_hidden:
             try:
                 self._raise_above_taskbar()
             except Exception:
@@ -2327,10 +2364,12 @@ class MonitorApp:
         self.popup = True
         self.layout_popup()
         self.apply_card_alpha()
+        self.draw_card()
+        self._mouse_down = bool(_u32.GetAsyncKeyState(0x01) & 0x8000)
         self.card_win.deiconify()
         self.card_win.lift()
         self.card_win.focus_force()
-        self.draw_card()
+        self._popup_focus_owned = self._owns_foreground()
         if self._popup_after is None:
             self._popup_after = self.root.after(100, self._popup_watch)
 
@@ -2355,26 +2394,39 @@ class MonitorApp:
                 x, y = win.winfo_rootx(), win.winfo_rooty()
                 if x <= px < x + win.winfo_width() and y <= py < y + win.winfo_height():
                     return True
-        if self.mode == "taskbar" and self._tb_rect:
-            x, y, w, h = self._tb_rect
-            if x <= px < x + w and y <= py < y + h:
-                return True
-        return False
+        return self._inside_launcher(px, py)
+
+    def _inside_launcher(self, px, py):
+        tray = getattr(self, "tray", None)
+        bounds = [self._tb_rect if self.mode == "taskbar" else None, tray.rect() if tray is not None else None]
+        return any(x <= px < x + w and y <= py < y + h for x, y, w, h in filter(None, bounds))
+
+    def _owns_foreground(self):
+        hwnd = _u32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wt.DWORD()
+        _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value == os.getpid()
 
     def _popup_watch(self):
         self._popup_after = None
         if not self._popup_win or self._closing:
             return
         try:
-            # The low bit also catches clicks completed between two timer callbacks.
             state = _u32.GetAsyncKeyState(0x01)
             down = bool(state & 0x8000)
-            clicked = (down and not self._mouse_down) or bool(state & 1)
+            # The low bit can belong to the click that opened this popup; it is not a new press.
+            clicked = down and not self._mouse_down
             self._mouse_down = down
-            if clicked:
+            focused = self._owns_foreground()
+            lost_focus = getattr(self, "_popup_focus_owned", False) and not focused
+            if focused:
+                self._popup_focus_owned = True
+            if clicked or lost_focus:
                 pt = wt.POINT()
                 _u32.GetCursorPos(ctypes.byref(pt))
-                if not self._inside_popup(pt.x, pt.y):
+                if (clicked and not self._inside_popup(pt.x, pt.y)) or (lost_focus and not self._inside_launcher(pt.x, pt.y)):
                     self.hide_detail()
                     return
         except Exception:
@@ -2599,12 +2651,12 @@ class MonitorApp:
             ("item", "收起详情" if self.popup else "查看性能详情", "↗", self.toggle_detail, 36),
             ("item", "样式与布局", "设置", lambda: self.open_settings("appearance"), 36),
             ("gap", "", "", None, 10),
-            ("item", "任务栏样式", STRIP_STYLES[self.style], lambda: self.cycle("style"), 36),
-            ("item", "展示排版", STRIP_LAYOUTS[self.cfg["strip_layout"]][0], lambda: self.cycle("strip_layout"), 36),
-            ("item", "自由选择指标", f"{len(selected_strip_items(self.cfg))} 项", lambda: self.open_settings("metrics"), 36),
-            ("item", "显示模式", mode_name, lambda: self.cycle("mode"), 36),
-            ("item", "面板主题", {"dark": "深空", "light": "云白", "minimal": "素纸", "glass": "雾蓝"}[self.card_theme],
-             lambda: self.cycle("card_theme"), 36),
+            ("item", "任务栏样式", STRIP_STYLES[self.style] + " ›", lambda: self.open_settings("appearance"), 36),
+            ("item", "展示排版", STRIP_LAYOUTS[self.cfg["strip_layout"]][0] + " ›", lambda: self.open_settings("appearance"), 36),
+            ("item", "自由选择指标", f"{len(selected_strip_items(self.cfg))} 项 ›", lambda: self.open_settings("metrics"), 36),
+            ("item", "显示模式", mode_name + " ›", lambda: self.open_settings("panel"), 36),
+            ("item", "面板主题", {"dark": "深空", "light": "云白", "minimal": "素纸", "glass": "雾蓝"}[self.card_theme] + " ›",
+             lambda: self.open_settings("panel"), 36),
             ("gap", "", "", None, 10),
             ("item", "锁定位置", "已锁定" if self.locked else "可拖动", self.toggle_lock, 36),
             ("item", "重置位置", "", self.reset_position, 36),
@@ -2644,7 +2696,9 @@ class MonitorApp:
 
     def show_menu(self, x=None, y=None):
         if self._menu_win is not None:
-            self.close_menu()
+            # Tray callbacks can report the same right click more than once.
+            self._menu_win.lift()
+            self._menu_win.focus_force()
             return
         win = tk.Toplevel(self.root)
         win.withdraw()
@@ -2656,6 +2710,7 @@ class MonitorApp:
         canvas = tk.Canvas(win, highlightthickness=0, bd=0, bg="#ff00fe")
         canvas.pack(fill="both", expand=True)
         self._menu_win, self._menu_canvas = win, canvas
+        self._menu_item = None
         self._menu_hover = -1
         self._menu_rows_data = self.menu_rows()
         dh = sum(row[4] for row in self._menu_rows_data) + 16
@@ -2667,7 +2722,7 @@ class MonitorApp:
         y = self.root.winfo_pointery() if y is None else y
         x, y = clamp(x, ax + 4, ax + aw - w - 4), clamp(y, ay + 4, ay + ah - h - 4)
         self._menu_rect = (x, y, w, h)
-        self._menu_ts = time.monotonic()
+        self._menu_mouse_down = bool(_u32.GetAsyncKeyState(0x01) & 0x8000)
         self.place_window(win, w, h, x, y)
         canvas.bind("<Motion>", self._menu_motion)
         canvas.bind("<Button-1>", self._menu_click)
@@ -2681,6 +2736,7 @@ class MonitorApp:
         win.deiconify()
         win.lift()
         win.focus_force()
+        self._menu_focus_owned = self._owns_foreground()
         self._menu_after = self.root.after(140, self._menu_watch)
 
     def menu_key(self, direction):
@@ -2737,12 +2793,19 @@ class MonitorApp:
         self._menu_after = None
         if self._menu_win is None or self._closing:
             return
-        state = _u32.GetAsyncKeyState(1)
-        if state & 0x8001 and time.monotonic() - self._menu_ts > 0.2:
+        down = bool(_u32.GetAsyncKeyState(1) & 0x8000)
+        clicked = down and not self._menu_mouse_down
+        self._menu_mouse_down = down
+        focused = self._owns_foreground()
+        lost_focus = getattr(self, "_menu_focus_owned", False) and not focused
+        if focused:
+            self._menu_focus_owned = True
+        if clicked or lost_focus:
             point = wt.POINT()
             _u32.GetCursorPos(ctypes.byref(point))
             x, y, w, h = self._menu_rect
-            if not (x <= point.x < x + w and y <= point.y < y + h):
+            inside = x <= point.x < x + w and y <= point.y < y + h
+            if (clicked and not inside) or (lost_focus and not self._inside_launcher(point.x, point.y)):
                 self.close_menu()
                 return
         self._menu_after = self.root.after(50, self._menu_watch)
@@ -2769,9 +2832,12 @@ class MonitorApp:
                 q.text(18, center, label, 11, p["red"] if label == "退出监视器" else p["text"])
                 q.text(self.MENU_W - 18, center, value, 9, p["faint"], "rm")
             top += rh
-        self._menu_photo = ImageTk.PhotoImage(q.finish(13), master=self.root)
-        self._menu_canvas.delete("all")
-        self._menu_canvas.create_image(0, 0, image=self._menu_photo, anchor="nw")
+        photo = ImageTk.PhotoImage(q.finish(13), master=self.root)
+        if self._menu_item is None:
+            self._menu_item = self._menu_canvas.create_image(0, 0, image=photo, anchor="nw")
+        else:
+            self._menu_canvas.itemconfigure(self._menu_item, image=photo)
+        self._menu_photo = photo
 
     # ---------------- 设置窗口
     def open_settings(self, tab=None):

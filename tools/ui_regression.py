@@ -31,6 +31,58 @@ def main():
 
         try:
             pump()
+            app.set_mode("taskbar")
+            strip = app.strip
+            assert strip and strip.hwnd
+            assert strip._proc(strip.hwnd, strip.WM_MOUSEACTIVATE, 0, 0) == strip.MA_NOACTIVATE
+            # A release that started elsewhere must not toggle the taskbar popup.
+            with patch.object(app, "ui_call") as enqueue:
+                strip._proc(strip.hwnd, strip.WM_LBUTTONUP, 0, 0)
+                strip._proc(strip.hwnd, strip.WM_RBUTTONUP, 0, 0)
+                enqueue.assert_not_called()
+                strip._proc(strip.hwnd, strip.WM_LBUTTONDOWN, 0, 0)
+                strip._proc(strip.hwnd, strip.WM_LBUTTONUP, 0, 0)
+                enqueue.assert_called_once_with("toggle")
+                enqueue.reset_mock()
+                strip._proc(strip.hwnd, strip.WM_RBUTTONDOWN, 0, 0)
+                strip._proc(strip.hwnd, strip.WM_RBUTTONUP, 0, 0)
+                enqueue.assert_called_once_with("menu")
+            with patch.object(app.root, "withdraw") as withdraw, patch.object(mon._u32, "ShowWindow") as show:
+                app.dock_now()
+                app.dock_now()
+                withdraw.assert_not_called()
+                show.assert_not_called()
+            # Exercise the actual menu canvas bindings, not only their callback functions.
+            for label, tab in (("任务栏样式", "appearance"), ("展示排版", "appearance"),
+                               ("自由选择指标", "metrics"), ("显示模式", "panel"), ("面板主题", "panel")):
+                before = dict(app.cfg)
+                app.show_menu(400, 100)
+                pump(0.08)
+                menu = app._menu_win
+                app.show_menu(400, 100)  # Duplicate tray/context notifications keep one menu open.
+                assert app._menu_win is menu and menu.winfo_exists()
+                row_y = 8
+                for kind, text, value, action, height in app._menu_rows_data:
+                    if text == label:
+                        row_y += height / 2
+                        break
+                    row_y += height
+                else:
+                    raise AssertionError(label)
+                app._menu_canvas.event_generate("<Motion>", x=30, y=round(row_y * app._menu_scale))
+                assert len(app._menu_canvas.find_all()) == 1
+                app._menu_canvas.event_generate("<Button-1>", x=30, y=round(row_y * app._menu_scale))
+                pump(0.08)
+                assert app._menu_win is None
+                assert app._set_win and app._set_win.winfo_exists() and app._settings_tab == tab, label
+                assert app.cfg == before, (label, before, app.cfg)
+                app._close_settings()
+            app.show_detail()
+            with patch.object(mon._u32, "GetAsyncKeyState", return_value=1), patch.object(app, "_owns_foreground", return_value=True):
+                pump(0.3)
+                assert app._popup_win, "The opening click must not dismiss the popup"
+            # Both the strip and tray launchers must wait for button-up to toggle once.
+            app.hide_detail()
             for mode in ("card", "mini", "tray", "taskbar", "card", "tray"):
                 app.set_mode(mode)
                 pump()
@@ -188,7 +240,7 @@ def main():
             assert not failures, failures
             error_log = Path(folder) / "error.log"
             assert not error_log.exists(), error_log.read_text(encoding="utf-8") if error_log.exists() else ""
-            print("UI SELFTEST OK: modes, themes, metric selection/order/persistence, all layouts/styles, settings, timers, fullscreen, edges, GDI resources", flush=True)
+            print("UI SELFTEST OK: taskbar mouse messages, menu navigation, popup stability, modes, themes, metric selection/order/persistence, all layouts/styles, settings, timers, fullscreen, edges, GDI resources", flush=True)
         finally:
             app.quit()
 
