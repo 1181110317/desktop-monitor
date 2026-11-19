@@ -22,12 +22,24 @@ def main():
         app = mon.MonitorApp()
         failures = []
         app.root.report_callback_exception = lambda *exc: failures.append(exc)
+        # Keep the test's Toplevels off the user's desktop; assertions inspect widget state.
+        real_place_window = app.place_window
+        app.place_window = lambda window, w, h, x, y: real_place_window(window, w, h, -20000, -20000)
 
         def pump(seconds=0.05):
             until = time.monotonic() + seconds
             while time.monotonic() < until:
                 app.root.update()
                 time.sleep(0.01)
+
+        def wait_until(predicate, seconds=2.0):
+            until = time.monotonic() + seconds
+            while time.monotonic() < until:
+                app.root.update()
+                if predicate():
+                    return True
+                time.sleep(0.01)
+            return False
 
         try:
             pump()
@@ -53,30 +65,32 @@ def main():
                 withdraw.assert_not_called()
                 show.assert_not_called()
             # Exercise the actual menu canvas bindings, not only their callback functions.
-            for label, tab in (("任务栏样式", "appearance"), ("展示排版", "appearance"),
-                               ("自由选择指标", "metrics"), ("显示模式", "panel"), ("面板主题", "panel")):
-                before = dict(app.cfg)
-                app.show_menu(400, 100)
-                pump(0.08)
-                menu = app._menu_win
-                app.show_menu(400, 100)  # Duplicate tray/context notifications keep one menu open.
-                assert app._menu_win is menu and menu.winfo_exists()
-                row_y = 8
-                for kind, text, value, action, height in app._menu_rows_data:
-                    if text == label:
-                        row_y += height / 2
-                        break
-                    row_y += height
-                else:
-                    raise AssertionError(label)
-                app._menu_canvas.event_generate("<Motion>", x=30, y=round(row_y * app._menu_scale))
-                assert len(app._menu_canvas.find_all()) == 1
-                app._menu_canvas.event_generate("<Button-1>", x=30, y=round(row_y * app._menu_scale))
-                pump(0.08)
-                assert app._menu_win is None
-                assert app._set_win and app._set_win.winfo_exists() and app._settings_tab == tab, label
-                assert app.cfg == before, (label, before, app.cfg)
-                app._close_settings()
+            # Keep real mouse/focus activity out of these assertions.
+            with patch.object(mon._u32, "GetAsyncKeyState", return_value=0), \
+                 patch.object(app, "_owns_foreground", return_value=True):
+                for label, tab in (("任务栏样式", "appearance"), ("展示排版", "appearance"),
+                                   ("自由选择指标", "metrics"), ("显示模式", "panel"), ("面板主题", "panel")):
+                    before = dict(app.cfg)
+                    app.show_menu(400, 100)
+                    assert wait_until(lambda: app._menu_win is not None)
+                    menu = app._menu_win
+                    app.show_menu(400, 100)  # Duplicate tray/context notifications keep one menu open.
+                    assert app._menu_win is menu and menu.winfo_exists()
+                    row_y = 8
+                    for kind, text, value, action, height in app._menu_rows_data:
+                        if text == label:
+                            row_y += height / 2
+                            break
+                        row_y += height
+                    else:
+                        raise AssertionError(label)
+                    app._menu_canvas.event_generate("<Motion>", x=30, y=round(row_y * app._menu_scale))
+                    assert len(app._menu_canvas.find_all()) == 1
+                    app._menu_canvas.event_generate("<Button-1>", x=30, y=round(row_y * app._menu_scale))
+                    assert wait_until(lambda: app._menu_win is None and app._set_win is not None
+                                      and app._set_win.winfo_exists() and app._settings_tab == tab), label
+                    assert app.cfg == before, (label, before, app.cfg)
+                    app._close_settings()
             app.show_detail()
             with patch.object(mon._u32, "GetAsyncKeyState", return_value=1), patch.object(app, "_owns_foreground", return_value=True):
                 pump(0.3)
@@ -93,29 +107,33 @@ def main():
                     assert bool(mon._u32.IsWindowVisible(app.strip.hwnd)) == (mode == "taskbar")
                 if mode == "tray":
                     assert app.root.state() == "withdrawn"
-            app.show_detail()
-            pump()
-            assert app.mode == "tray" and app._popup_win
-            app.hide_detail()
-            assert app.mode == "tray" and app.root.state() == "withdrawn"
-
-            for theme in mon.CARD_THEMES:
-                app.set_card_theme(theme)
-                for mode in ("card", "mini"):
-                    app.set_mode(mode)
-                    pump()
-                    assert app.canvas.find_all()
-                app.set_mode("taskbar")
+            with patch.object(mon._u32, "GetAsyncKeyState", return_value=0), \
+                 patch.object(app, "_owns_foreground", return_value=True):
                 app.show_detail()
                 pump()
-                app.card_action(330, 388, 1)
-                pump()
-                assert app._proc_expanded
-                app.card_action(330, 388, 1)
-                assert not app._proc_expanded
-                timers = app.root.tk.splitlist(app.root.tk.call("after", "info"))
-                assert len([t for t in timers if "_popup_watch" in str(app.root.tk.call("after", "info", t))]) == 1
+                assert app.mode == "tray" and app._popup_win
                 app.hide_detail()
+                assert app.mode == "tray" and app.root.state() == "withdrawn"
+
+                for theme in mon.CARD_THEMES:
+                    app.set_card_theme(theme)
+                    for mode in ("card", "mini"):
+                        app.set_mode(mode)
+                        pump()
+                        assert app.canvas.find_all()
+                    app.set_mode("taskbar")
+                    app.show_detail()
+                    pump()
+                    app.card_action(330, 388, 1)
+                    pump()
+                    assert app._proc_expanded
+                    app.card_action(330, 388, 1)
+                    assert not app._proc_expanded
+                    def popup_watch_timers():
+                        timers = app.root.tk.splitlist(app.root.tk.call("after", "info"))
+                        return [t for t in timers if "_popup_watch" in str(app.root.tk.call("after", "info", t))]
+                    assert wait_until(lambda: len(popup_watch_timers()) == 1, 1.0), popup_watch_timers()
+                    app.hide_detail()
             for tab in ("appearance", "metrics", "panel", "behavior", "about"):
                 app.open_settings(tab)
                 pump()
@@ -153,10 +171,13 @@ def main():
             assert app.cfg["strip_items"] == ["cpu", "down"]
             assert app._settings_preview.width() == app.strip_w
             order = app._settings_metric_order
+            index = list(mon.selected_strip_items(app.cfg)).index("down")
+            order.selection_clear(0, "end")
+            order.selection_set(index)
+            order.activate(index)
             order.focus_force()
             order.event_generate("<Alt-Up>")
-            pump()
-            assert app.cfg["strip_items"] == ["down", "cpu"]
+            assert wait_until(lambda: app.cfg["strip_items"] == ["down", "cpu"]), app.cfg["strip_items"]
             app.set_strip_option("strip_accent", "blue")
             assert app.cfg["strip_items"] == ["down", "cpu"]
             app.set_strip_option("strip_profile", "balanced")
@@ -220,6 +241,15 @@ def main():
                     app.dock_now(force=True)
                     rect = app.card_rect()
                     assert rect[2] > 0 and rect[3] > 0
+            # A tray-adjacent weather/widgets button must be left visible, not covered.
+            tray = {"TrayNotifyWnd": (2188, 1392, 2560, 1440)}
+            for widgets, anchor in (((2024, 1392, 152, 48), 2024), (None, 2188)):
+                with patch.object(mon, "taskbar_position", return_value=(0, 1392, 2560, 48, 3)), \
+                     patch.object(mon, "taskbar_children", return_value=tray), \
+                     patch.object(mon, "taskbar_widgets_rect", return_value=widgets):
+                    app.dock_now(force=True)
+                    x, _, w, _ = app._tb_rect
+                    assert x + w == anchor - round(8 * app.scale), (widgets, app._tb_rect)
             app.set_mode("card")
             with patch.object(app, "work_area", return_value=(-1920, -900, 1920, 860)):
                 x, y, w, h = app.card_rect()

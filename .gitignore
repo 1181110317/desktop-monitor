@@ -2,7 +2,7 @@
 config.json
 error.log
 disabled.flag
-dm_click.log
+dm_click.log*
 .venv/
 
 # Python

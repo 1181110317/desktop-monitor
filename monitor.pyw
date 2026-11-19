@@ -33,7 +33,7 @@ from contextlib import contextmanager
 import math
 
 APP_NAME = "桌面性能监视器"
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.5"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 RESOURCES = getattr(sys, "_MEIPASS", BASE)
 DATA_DIR = (os.path.join(os.environ.get("LOCALAPPDATA", BASE), "DesktopMonitor")
@@ -304,6 +304,245 @@ def taskbar_children():
     ref = PROC(cb)
     u.EnumChildWindows(tb, ref, 0)
     return out
+
+
+# Win11 把“小组件 / 天气”按钮放在通知区域左侧，但它没有独立 HWND，只能通过
+# UI Automation 读取位置。内嵌条排在它左边，透明样式就不会压住天气文字。
+_UIA_LOCAL = threading.local()
+_WIDGETS = {"lock": threading.Lock(), "started": False, "stop": None,
+            "key": None, "rect": None, "stamp": 0.0}
+
+
+class UIAVARIANT(ctypes.Structure):
+    _fields_ = [("vt", ctypes.c_ushort), ("reserved", ctypes.c_ushort * 3),
+                ("payload", ctypes.c_byte * 16)]
+
+
+def _guid(text):
+    parts = text.strip("{}").split("-")
+    return GUID(int(parts[0], 16), int(parts[1], 16), int(parts[2], 16),
+                (ctypes.c_ubyte * 8)(*bytes.fromhex(parts[3] + parts[4])))
+
+
+def _com_call(obj, index, restype, argtypes, *args):
+    """调用 COM 接口第 index 个虚函数；接口在进程内匿名使用。"""
+    table = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(table[index])(obj, *args)
+
+
+def _com_release(obj):
+    if obj is None or not getattr(obj, "value", obj):
+        return
+    try:
+        _com_call(obj, 2, ctypes.c_ulong, [])            # IUnknown::Release
+    except Exception:
+        pass
+
+
+def _variant_clear(value):
+    try:
+        oleaut = ctypes.WinDLL("oleaut32")
+        oleaut.VariantClear.argtypes = [ctypes.POINTER(UIAVARIANT)]
+        oleaut.VariantClear(ctypes.byref(value))
+    except Exception:
+        pass
+
+
+def _uia_client():
+    client = getattr(_UIA_LOCAL, "client", None)
+    if client is not None:
+        return client
+    if getattr(_UIA_LOCAL, "failed", False):
+        return None
+    try:
+        ole32 = ctypes.WinDLL("ole32")
+        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wt.DWORD]
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        ole32.CoCreateInstance.argtypes = [ctypes.POINTER(GUID), ctypes.c_void_p, wt.DWORD,
+                                           ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+        ole32.CoCreateInstance.restype = ctypes.c_long
+        ole32.CoInitializeEx(None, 2)                    # 每个查询线程各自 STA
+        client = ctypes.c_void_p()
+        if ole32.CoCreateInstance(ctypes.byref(_guid("{FF48DBA4-60EF-4201-AA87-54103EEF594E}")), None, 1,
+                                  ctypes.byref(_guid("{30CBE57D-D9D0-452A-AB13-7AC5AC4825EE}")),
+                                  ctypes.byref(client)) == 0 and client.value:
+            _UIA_LOCAL.client = client
+            return client
+    except Exception:
+        pass
+    _UIA_LOCAL.failed = True
+    return None
+
+
+def _uia_property(element, prop):
+    value = UIAVARIANT()
+    ctypes.memset(ctypes.byref(value), 0, ctypes.sizeof(value))
+    if _com_call(element, 10, ctypes.c_long,                # IUIAutomationElement::GetCurrentPropertyValue
+                 [ctypes.c_int, ctypes.POINTER(UIAVARIANT)],
+                 ctypes.c_int(prop), ctypes.byref(value)) != 0:
+        return None
+    return value
+
+
+def _uia_rect(element):
+    value = _uia_property(element, 30001)                   # UIA_BoundingRectanglePropertyId
+    if value is None:
+        return None
+    try:
+        if value.vt != 0x2005:                              # VT_ARRAY | VT_R8
+            return None
+        array = ctypes.c_void_p.from_buffer(value, 8).value
+        if not array:
+            return None
+        oleaut = ctypes.WinDLL("oleaut32")
+        oleaut.SafeArrayGetLBound.argtypes = [ctypes.c_void_p, wt.UINT, ctypes.POINTER(ctypes.c_long)]
+        oleaut.SafeArrayGetUBound.argtypes = [ctypes.c_void_p, wt.UINT, ctypes.POINTER(ctypes.c_long)]
+        oleaut.SafeArrayGetElement.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long), ctypes.c_void_p]
+        low, high = ctypes.c_long(), ctypes.c_long()
+        if (oleaut.SafeArrayGetLBound(array, 1, ctypes.byref(low)) or
+                oleaut.SafeArrayGetUBound(array, 1, ctypes.byref(high))):
+            return None
+        numbers = []
+        for index in range(low.value, min(high.value, low.value + 3) + 1):
+            number = ctypes.c_double()
+            at = ctypes.c_long(index)
+            if oleaut.SafeArrayGetElement(array, ctypes.byref(at), ctypes.byref(number)):
+                return None
+            numbers.append(number.value)
+        return tuple(round(n) for n in numbers) if len(numbers) == 4 else None
+    finally:
+        _variant_clear(value)
+
+
+def _uia_widget_rect(tb):
+    """查找 AutomationId=WidgetsButton 的矩形；找不到返回 None。"""
+    client = _uia_client()
+    if not client:
+        return None
+    element = condition = found = None
+    try:
+        element = ctypes.c_void_p()
+        if _com_call(client, 6, ctypes.c_long,               # IUIAutomation::ElementFromHandle
+                     [wt.HWND, ctypes.POINTER(ctypes.c_void_p)],
+                     wt.HWND(tb), ctypes.byref(element)) != 0 or not element.value:
+            return None
+        oleaut = ctypes.WinDLL("oleaut32")
+        oleaut.SysAllocString.argtypes = [wt.LPCWSTR]
+        oleaut.SysAllocString.restype = ctypes.c_void_p
+        oleaut.SysFreeString.argtypes = [ctypes.c_void_p]
+        text = oleaut.SysAllocString("WidgetsButton")
+        value = UIAVARIANT()
+        value.vt = 8                                         # VT_BSTR
+        ctypes.c_void_p.from_buffer(value, 8).value = text
+        condition = ctypes.c_void_p()
+        try:
+            hr = _com_call(client, 23, ctypes.c_long,        # IUIAutomation::CreatePropertyCondition
+                           [ctypes.c_int, UIAVARIANT, ctypes.POINTER(ctypes.c_void_p)],
+                           ctypes.c_int(30011), value, ctypes.byref(condition))  # UIA_AutomationIdPropertyId
+        finally:
+            oleaut.SysFreeString(text)
+        if hr != 0 or not condition.value:
+            return None
+        found = ctypes.c_void_p()
+        if _com_call(element, 5, ctypes.c_long,              # IUIAutomationElement::FindFirst
+                     [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                     ctypes.c_int(4), condition, ctypes.byref(found)) != 0 or not found.value:
+            return None
+        return _uia_rect(found)
+    finally:
+        for obj in (found, condition, element):
+            _com_release(obj)
+
+
+def _taskbar_widgets_key():
+    """会影响天气按钮位置的廉价信号：任务栏、托盘、小组件开关。"""
+    tb = taskbar_hwnd()
+    if not tb:
+        return None
+    bounds = wt.RECT()
+    if not _u32.GetWindowRect(tb, ctypes.byref(bounds)):
+        return None
+    tray = taskbar_children().get("TrayNotifyWnd")
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced") as key:
+            widgets, _ = winreg.QueryValueEx(key, "TaskbarDa")
+    except OSError:
+        widgets = None
+    return (tb, bounds.left, bounds.top, bounds.right, bounds.bottom, tray, widgets)
+
+
+def _refresh_widgets_rect():
+    try:
+        key = _taskbar_widgets_key()
+        rect = _uia_widget_rect(key[0]) if key else None
+    except Exception:
+        key, rect = None, None           # 读取失败时退回托盘停靠，不影响监控本身
+    with _WIDGETS["lock"]:
+        _WIDGETS.update(key=key, rect=rect, stamp=time.monotonic())
+    return rect
+
+
+def _widgets_watch_tick():
+    """布局信号变了就重测；否则最多每 30 秒兜底刷新一次。"""
+    key = _taskbar_widgets_key()
+    with _WIDGETS["lock"]:
+        fresh = (key is not None and key == _WIDGETS["key"]
+                 and time.monotonic() - _WIDGETS["stamp"] < 30)
+    if fresh:
+        return
+    try:
+        rect = _uia_widget_rect(key[0]) if key else None
+    except Exception:
+        rect = None
+    with _WIDGETS["lock"]:
+        _WIDGETS.update(key=key, rect=rect, stamp=time.monotonic())
+
+
+def _widgets_watch_loop(stop):
+    while not stop.is_set():
+        try:
+            _widgets_watch_tick()
+        except Exception:
+            pass
+        stop.wait(0.5)
+
+
+def _start_widgets_watch():
+    if _WIDGETS["stop"] is not None:
+        return
+    _WIDGETS["stop"] = threading.Event()
+    threading.Thread(target=_widgets_watch_loop, args=(_WIDGETS["stop"],),
+                     name="taskbar-widgets", daemon=True).start()
+
+
+def taskbar_widgets_rect():
+    """通知区域左侧“小组件 / 天气”按钮的 (x, y, w, h)；位置由后台持续跟随。"""
+    if sys.getwindowsversion().build < 22000:
+        return None
+    with _WIDGETS["lock"]:
+        if _WIDGETS["started"]:
+            return _WIDGETS["rect"]
+        _WIDGETS["started"] = True
+    try:
+        rect = _refresh_widgets_rect()   # 首帧同步测一次，避免先压住天气再跳开
+    except Exception:
+        rect = None
+    _start_widgets_watch()
+    return rect
+
+
+def dock_right_x(tx, w, margin, tray_left, widgets=None):
+    """水平任务栏上右对齐时的 x；天气按钮紧贴托盘时排在它左侧，而不是压在它上面。"""
+    anchor = tray_left
+    if widgets:
+        left, _, width, _ = widgets
+        right = left + width
+        if (width > 0 and tx <= left < anchor and right <= anchor
+                and anchor - right <= max(24, margin * 4)):
+            anchor = left
+    return max(tx + margin, anchor - margin - w)
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -2203,7 +2442,7 @@ class MonitorApp:
             kids = taskbar_children()
             tray = kids.get("TrayNotifyWnd")
             tray_left = tray[0] if tray else tx + tw - round(250 * self.scale)
-            x = max(tx + margin, tray_left - margin - w)
+            x = dock_right_x(tx, w, margin, tray_left, taskbar_widgets_rect())
             h = min(max(20, th - 4), content_h + 2)
             y = ty + (th - h) // 2
         else:
@@ -2298,7 +2537,26 @@ class MonitorApp:
         else:
             self.show_detail()
 
+    def _ui_trace(self, action, extra=""):
+        """记录界面窗口的打开来源；文件超过 128KB 自动轮转，便于定位偶发弹窗。"""
+        try:
+            path = os.path.join(DATA_DIR, "dm_click.log")
+            if os.path.exists(path) and os.path.getsize(path) > 128 * 1024:
+                os.replace(path, path + ".1")
+            chain = []
+            frame = sys._getframe(1)
+            for _ in range(5):
+                if frame is None:
+                    break
+                chain.append(frame.f_code.co_name)
+                frame = frame.f_back
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {action} {extra} <- {' <- '.join(chain)}\n")
+        except Exception:
+            pass
+
     def show_detail(self):
+        self._ui_trace("show_detail", f"popup={self._popup_win}")
         if self.mode == "card":
             self.show_window()
             self.root.lift()
@@ -2359,6 +2617,7 @@ class MonitorApp:
         return int(clamp(x, ax, ax + aw - w)), int(clamp(y, ay, ay + ah - h)), w, h
 
     def show_popup(self):
+        self._ui_trace("show_popup")
         self._ensure_card_win()
         self._popup_win = True
         self.popup = True
@@ -2695,6 +2954,7 @@ class MonitorApp:
             self.set_layer(order[(order.index(self.layer) + 1) % len(order)])
 
     def show_menu(self, x=None, y=None):
+        self._ui_trace("show_menu", f"existing={self._menu_win is not None}")
         if self._menu_win is not None:
             # Tray callbacks can report the same right click more than once.
             self._menu_win.lift()
@@ -2841,6 +3101,7 @@ class MonitorApp:
 
     # ---------------- 设置窗口
     def open_settings(self, tab=None):
+        self._ui_trace("open_settings", f"tab={tab} existing={self._set_win is not None}")
         if tab is not None:
             self._settings_tab = tab
         if self._set_win is not None and self._set_win.winfo_exists():
@@ -3368,6 +3629,8 @@ class MonitorApp:
         if self.strip:
             self.strip.destroy()
         self.stats.stop()
+        if _WIDGETS["stop"] is not None:
+            _WIDGETS["stop"].set()
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(os.path.join(DATA_DIR, "disabled.flag"), "w") as f:

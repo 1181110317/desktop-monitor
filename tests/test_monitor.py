@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -186,6 +187,78 @@ class TaskbarInteractionTests(unittest.TestCase):
         with patch.object(mon._u32, "GetAsyncKeyState", return_value=0):
             app.show_popup()
         self.assertEqual(events, ["draw", "show"])
+
+
+class TaskbarDockingTests(unittest.TestCase):
+    @staticmethod
+    def widgets_state(**values):
+        keys = ("started", "stop", "key", "rect", "stamp")
+        saved = {key: mon._WIDGETS[key] for key in keys}
+        mon._WIDGETS.update(values)
+
+        class Restore:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                mon._WIDGETS.update(saved)
+
+        return Restore()
+
+    def test_strip_docks_left_of_a_weather_button_that_sits_next_to_the_tray(self):
+        tray_left, width, margin = 3282, 195, 12
+        self.assertEqual(mon.dock_right_x(0, width, margin, tray_left),
+                         tray_left - margin - width)
+        self.assertEqual(mon.dock_right_x(0, width, margin, tray_left, (3036, 2088, 228, 72)),
+                         3036 - margin - width)
+
+    def test_far_or_invalid_widgets_keep_the_regular_tray_anchor(self):
+        tray_left, width, margin = 2188, 195, 12
+        expected = tray_left - margin - width
+        for widgets in ((200, 1392, 152, 48),        # widgets button at the far left
+                        (1500, 1392, 152, 48),       # not adjacent to the tray
+                        (2188, 1392, 152, 48),       # starts at the tray
+                        (2100, 1392, -1, 48)):      # unusable rectangle
+            with self.subTest(widgets=widgets):
+                self.assertEqual(mon.dock_right_x(0, width, margin, tray_left, widgets), expected)
+
+    def test_docking_never_leaves_the_taskbar_when_space_is_tight(self):
+        self.assertEqual(mon.dock_right_x(0, 2000, 12, 1500, (1300, 1392, 152, 48)), 12)
+
+    def test_weather_lookup_is_skipped_before_windows_11(self):
+        with patch.object(mon.sys, "getwindowsversion", return_value=SimpleNamespace(build=19045)), \
+             patch.object(mon, "_uia_widget_rect") as lookup:
+            self.assertIsNone(mon.taskbar_widgets_rect())
+        lookup.assert_not_called()
+
+    def test_taskbar_docking_reads_the_background_measurement(self):
+        with self.widgets_state(started=True, rect=(3036, 2088, 228, 72)), \
+             patch.object(mon.sys, "getwindowsversion", return_value=SimpleNamespace(build=22631)), \
+             patch.object(mon, "_uia_widget_rect") as lookup:
+            self.assertEqual(mon.taskbar_widgets_rect(), (3036, 2088, 228, 72))
+        lookup.assert_not_called()
+
+    def test_widgets_watch_reuses_a_fresh_layout_and_remeasures_changes(self):
+        now = time.monotonic()
+        with self.widgets_state(started=True, key=("old",), rect=(1, 2, 3, 4), stamp=now), \
+             patch.object(mon, "_taskbar_widgets_key", return_value=("old",)), \
+             patch.object(mon, "_uia_widget_rect") as lookup:
+            mon._widgets_watch_tick()
+            lookup.assert_not_called()
+        with self.widgets_state(started=True, key=("old",), rect=(1, 2, 3, 4), stamp=now), \
+             patch.object(mon, "_taskbar_widgets_key", return_value=("new", 7)), \
+             patch.object(mon, "_uia_widget_rect", return_value=(50, 60, 70, 80)) as lookup:
+            mon._widgets_watch_tick()
+            lookup.assert_called_once_with("new")
+            self.assertEqual(mon._WIDGETS["rect"], (50, 60, 70, 80))
+            self.assertEqual(mon._WIDGETS["key"], ("new", 7))
+
+    def test_widgets_watch_remeasures_after_the_safety_interval(self):
+        with self.widgets_state(started=True, key=("same",), rect=(1, 2, 3, 4), stamp=0.0), \
+             patch.object(mon, "_taskbar_widgets_key", return_value=("same",)), \
+             patch.object(mon, "_uia_widget_rect", return_value=None) as lookup:
+            mon._widgets_watch_tick()
+            lookup.assert_called_once_with("same")
 
 
 class NetworkTests(unittest.TestCase):
